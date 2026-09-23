@@ -1,56 +1,71 @@
 # Documentation
 
+## Pair Classification and Universe Gate
+
+Universe policy: **stablecoins and high-caps only**. Every pool/position is classified
+from its pair symbols (explicit `token_x_symbol`/`token_y_symbol`, or parsed from the
+pool name like `SOL-USDC (bin 4)`):
+
+- both in `STABLECOINS` → `stable_stable`
+- one stable, one in `HIGH_CAPS` → `stable_bluechip`
+- both in `HIGH_CAPS` → `bluechip_bluechip`
+- anything else → `off_universe` (pool: IGNORE; position: CLOSE)
+- unparseable → `unknown` (same gating as off_universe)
+
+Each class has its own scoring profile (`POOL_PROFILES`, `POSITION_PROFILES`) with
+class-appropriate weights, volatility peak, and APR cap.
+
 ## Scoring Formulas
 
 ### Pool LP Opportunity Score
 
 Each component is scored 0-its-weight, then summed to 0-100.
 
-#### `score_pool_fee_yield(pool)`
+#### `score_pool_fee_yield(pool, max_pts, apr_cap_pct)`
 
 ```
-fee_yield = 25 * clamp(apr / 300, 0, 1) + 10 * clamp(fee_tvl_ratio / 1, 0, 1)
+fee_yield = max_pts * clamp(apr / apr_cap, 0, 1)
 ```
 
-- `realized_fee_apr`: realized annual fee APR percentage
-- `fee_tvl_ratio`: fee/TVL ratio converted to percentage (×100)
-- Ratio of 1% daily fee/TVL is exceptional and maxes the 10pt component
+- `realized_fee_apr` only; fee/TVL is NOT added (it duplicates the turnover signal)
+- `apr_cap_pct`: 100 for stable_stable, 300 for bluechip classes
 
-#### `score_pool_turnover(pool)`
+#### `score_pool_turnover(pool, max_pts)`
 
 ```
-turnover = 20 * clamp( (volume_window / tvl) / 5, 0, 1)
+turnover = max_pts * clamp( (volume_window / tvl) / 5, 0, 1)
 ```
 
-- Turnover of 5x over the window maxes the 20pt component
-- Returns 0 if TVL is 0
+- Turnover of 5x over the window maxes out; 0 if TVL is 0
 
-#### `score_pool_depth(pool)`
+#### `score_pool_depth(pool, max_pts)`
 
 ```
 if tvl < 50_000: score = 0
-else: score = 15 * log(tvl / 50_000) / log(5_000_000 / 50_000)
+else: score = max_pts * log(tvl / 50_000) / log(5_000_000 / 50_000)
 ```
 
 - Log-scale between DEPTH_MIN_USD (50K) and DEPTH_MAX_USD (5M)
-- Below minimum returns 0; above maximum returns 15
 
-#### `score_pool_volatility_fit(pool)`
+#### `score_pool_volatility_fit(pool, max_pts, peak_pct)`
 
-Triangular curve peaking at VOLATILITY_PEAK_PCT (8%):
-- vol <= 0 → 0
-- vol >= 3*peak (24%) → 0
-- vol <= peak: score = 20 * vol / peak
-- vol > peak: score = 20 * (3*peak - vol) / (2*peak)
+Triangular curve peaking at the profile's volatility peak
+(0.5% stable_stable, 8% stable_bluechip, 10% bluechip_bluechip):
+- vol <= 0 → 0; vol >= 3*peak → 0
+- vol <= peak: max_pts * vol / peak; vol > peak: max_pts * (3*peak - vol) / (2*peak)
 
-#### `score_pool_bin_step_fit(pool)`
+#### `score_pool_depeg_safety(pool, max_pts, sym_x, sym_y)`
 
-- bin_step <= 0 → neutral 5
-- spacing_pct = bin_step * 0.02 (DLMM bin step in % price distance)
-- ratio = spacing_pct / vol
-- ratio < 0.2 → 10 * ratio / 0.2 * 0.5 (0-5, too fine)
-- ratio <= 1.5 → 5 + 5 * (ratio - 0.2) / 1.3 (5-10, well-matched)
-- ratio > 1.5 → max(0, 10 - (ratio - 1.5) * 4) (decays if too coarse)
+Stable side(s) only; worst side wins:
+
+```
+per stable side: clamp(1 - |price_usd - 1| / 0.005, 0, 1)
+score = max_pts * min(side_scores)
+score = max_pts * 0.5 for a side with unknown price (fail-suspicious)
+```
+
+- 0.5% from $1 (DEPEG_ZERO_DIST) zeroes the side
+- Not applicable (bluechip_bluechip): component omitted
 
 ### Position Health Score
 

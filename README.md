@@ -27,9 +27,23 @@ python3 run_cycle.py [--write-signals] [--signals-dir D] [--json] [--max-age-sec
 
 ## Scoring Model
 
-- Pool LP Opportunity Score (0-100): fee_yield + turnover + depth + volatility_fit + bin_step_fit
-- Position Health Score (0-100): range_status + fee_capture + il_risk + time_decay
-- Verdicts: OPEN_CANDIDATE / WATCH / IGNORE / CLOSE / REVIEW / HOLD / COLLECT_FEES
+Universe policy: **stablecoin and high-cap pairs only** (`STABLECOINS`, `HIGH_CAPS` in
+`lp_scoring.py`). Off-universe/unparseable pools are hard-gated to IGNORE; existing
+positions in them get CLOSE.
+
+Pairs are auto-classified (`stable_stable`, `stable_bluechip`, `bluechip_bluechip`)
+and scored with class-specific profiles:
+
+- Pool LP Opportunity Score (0-100):
+  - stable_stable: fee_yield(35) + turnover(15) + depth(15) + depeg_safety(25) + volatility_fit(10)
+  - stable_bluechip: fee_yield(30) + turnover(20) + depth(15) + volatility_fit(20) + depeg_safety(15)
+  - bluechip_bluechip: fee_yield(30) + turnover(20) + depth(15) + volatility_fit(35)
+- Position Health Score (0-100):
+  - stable_stable: range_status(35, boundary-distance weighted) + fee_capture(25) + depeg_exposure(25) + staleness(15)
+  - bluechip classes: range_status(30) + fee_capture(20) + il_risk(30) + staleness(20)
+- Verdicts: OPEN_CANDIDATE / WATCH / IGNORE / CLOSE / REVIEW / HOLD / REBALANCE / COLLECT_FEES
+- REBALANCE: position is CLOSE/REVIEW but its pool is an OPEN_CANDIDATE → close and re-range.
+- Collect fees: HOLD with fees >= max($5, 1% of position value).
 
 ## Supported DEXes
 
@@ -41,11 +55,13 @@ python3 run_cycle.py [--write-signals] [--signals-dir D] [--json] [--max-age-sec
 
 ## Configuration
 
-Tunable weights and thresholds defined in `lp_scoring.py`:
-- `POOL_WEIGHTS`: fee_yield(35), turnover(20), depth(15), volatility_fit(20), bin_step_fit(10)
-- `POSITION_WEIGHTS`: range_status(35), fee_capture(25), il_risk(25), time_decay(15)
+Tunables defined in `lp_scoring.py`:
+- `STABLECOINS` / `HIGH_CAPS`: universe whitelist
+- `POOL_PROFILES` / `POSITION_PROFILES`: per-pair-class weights, volatility peak, APR cap
 - Pool thresholds: open >= 70, watch 55-70
 - Position thresholds: close < 40, review 40-60, hold >= 60
+- `DEPTH_MIN_USD` / `DEPTH_MAX_USD`, `DEPEG_ZERO_DIST`, `STALE_GRACE_DAYS` / `STALE_ZERO_DAYS`,
+  `COLLECT_MIN_USD` / `COLLECT_PCT_OF_VALUE`
 
 ## Rail Constants (George defaults)
 

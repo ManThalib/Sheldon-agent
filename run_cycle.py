@@ -186,7 +186,7 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
             })
             continue
 
-        if action in {"CLOSE", "COLLECT_FEES"}:
+        if action in {"CLOSE", "REBALANCE", "COLLECT_FEES"}:
             lower = v.get("lower_bound")
             upper = v.get("upper_bound")
             try:
@@ -196,7 +196,7 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
                 lower, upper = 0, 0
             signal = {
                 "signal_id": f"sheldon-{base}-{idx}",
-                "action": "close" if action == "CLOSE" else "claim_fees",
+                "action": "claim_fees" if action == "COLLECT_FEES" else "close",
                 "dex": dex,
                 "pool_address": pool_addr,
                 "position_id": v.get("position"),
