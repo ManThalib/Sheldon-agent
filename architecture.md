@@ -2,18 +2,19 @@
 
 ## Overview
 
-Sheldon is a deterministic LP scoring engine that evaluates DeFi liquidity pool positions on Meteora DLMM. It consists of two main modules:
+Sheldon is a deterministic LP scoring engine that evaluates DeFi liquidity pool positions on **Meteora DLMM**, **Raydium CLMM**, and **Orca Whirlpool**. It consists of two main modules:
 
 1. **`lp_scoring.py`** — Core scoring engine
-2. **`run_cycle.py`** — Cycle runner that loads data, invokes scoring, and produces signals/logs
+2. **`run_cycle.py`** — Cycle runner that loads data, invokes scoring, builds/caches signals, and logs results
 
 ## Data Flow
 
 1. **Input**: Newest `pool_scan-*.json` and `position_scan-*.json` files from configured directories
 2. **Validation**: Freshness check (max 3900s default), malformed data handling
-3. **Scoring**: Each pool gets a 0-100 score across 5 components; each position gets a 0-100 score across 4 components
+3. **Scoring**: Each pool gets a 0-100 score across 5 components; each position gets a 0-100 score across 4 components. `score_pool` embeds the original `_pool` dict in its result; `verdicts` for OPEN_CANDIDATE actions include `_pool` for downstream use
 4. **Verdicts**: Scores map to actionable verdicts (OPEN_CANDIDATE, HOLD, CLOSE, COLLECT_FEES, etc.)
-5. **Output**: JSON report, human summary, optional George-schema signal files, daily markdown log
+5. **Signal building**: For supported DEXes, `CLOSE`/`COLLECT_FEES` produce direct signals; `OPEN_CANDIDATE` goes through `_build_open_signal` which resolves USDC balance, computes 50/50 token split, and derives bin/tick range
+6. **Output**: JSON report, human summary, signal files written to pending queue, daily markdown log
 
 ## Scoring Components
 
@@ -45,14 +46,53 @@ Sheldon is a deterministic LP scoring engine that evaluates DeFi liquidity pool 
 ## Signal Generation
 
 `run_cycle.py` converts verdicts into George-schema signal files:
-- `CLOSE` → `close` signal with bin range
-- `COLLECT_FEES` → `claim_fees` signal
-- `OPEN_CANDIDATE` (Meteora) → review item (not queued automatically)
-- Non‑Meteora actions noted but not queued
+
+| Verdict | Action | DEX Support | Notes |
+|---|---|---|---|
+| `CLOSE` | `close` | meteora, raydium, orca | Direct signal with bin range |
+| `COLLECT_FEES` | `claim_fees` | meteora, raydium, orca | Direct signal with bin range |
+| `HOLD` | — | — | No signal |
+| `REVIEW` | — | — | No signal |
+| `WATCH` | — | — | No signal |
+| `IGNORE` | — | — | No signal |
+| `OPEN_CANDIDATE` | `open` | meteora, raydium, orca | Full allocation logic via `_build_open_signal` |
+
+### OPEN Signal Allocation Logic
+
+```
+position_usd = min(idle_usdc * 0.25, DEFAULT_MAX_POSITION_USD)
+               >= MIN_POSITION_USD required
+
+half_usd = position_usd / 2
+amount_x = int((half_usd / px_x) * 10^dec_x)
+amount_y = int((half_usd / px_y) * 10^dec_y)
+
+half_width = max(1, DEFAULT_MAX_RANGE_WIDTH // 2)
+bin_range = [center - half_width, center + half_width]
+```
+
+Where `center` is `active_bin_id` for Meteora, `current_tick` (or `active_bin_id`) for Raydium/Orca.
+
+### USDC Balance Resolution Order
+
+1. `SHELDON_IDLE_USDC` environment variable
+2. `/data/missy-data/wallet_balances.json` (Missy cache)
+3. Live Solana RPC lookup via George's config (`agent.config.json`)
+4. Fallback 0.0 → OPEN signals skipped
 
 ## Output Artifacts
 
-- JSON report via `--json` flag
-- Human summary (default stdout)
-- Daily markdown log in memory directory
-- Signal JSON files in pending queue
+| Artifact | Description |
+|---|---|
+| JSON report | Full scoring data via `--json` flag |
+| Human summary | Default stdout line |
+| Signal JSON | Written to pending queue directory |
+| Daily markdown log | Appended to memory directory (YYYY-MM-DD.md) |
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Fatal error |
+| 2 | Stale/missing input data |

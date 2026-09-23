@@ -169,7 +169,7 @@ def score_pool(pool: dict) -> dict:
         verdict = "IGNORE"
     return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
             "dex": pool.get("dex"), "score": total, "components": components,
-            "verdict": verdict}
+            "verdict": verdict, "_pool": pool}
 
 
 # --------------------------------------------------------------------------
@@ -287,7 +287,8 @@ def run_cycle(pools_dir: str, positions_dir: str, max_age_seconds: float = 3900.
             report["verdicts"].append({
                 "action": "OPEN_CANDIDATE", "pool": s["pool"],
                 "pool_address": s["pool_address"], "dex": s.get("dex"),
-                "score": s["score"], "evidence": s["components"]})
+                "score": s["score"], "evidence": s["components"],
+                "_pool": s.get("_pool")})
 
     pos_data = load_json(pos_path)
     positions = pos_data.get("positions", []) if isinstance(pos_data, dict) else []

@@ -12,12 +12,42 @@ Returns exit 0 on success, 1 on fatal error, 2 on stale/missing data.
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
+import urllib.request
+import urllib.error
 
 from lp_scoring import newest_file, load_json
 import lp_scoring
+
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDtWv"
+
+# Protocols George can execute. Signals for anything else stay in review.
+SUPPORTED_DEXES = {"meteora", "raydium", "orca"}
+
+# Rail mirrors (George defaults). Externalize when George exposes machine-readable rails.
+MIN_POSITION_USD = 15.0
+DEFAULT_MAX_POSITION_USD = 100.0
+DEFAULT_MAX_RANGE_WIDTH = 200
+DEFAULT_MAX_SLIPPAGE_BPS = 100
+
+
+def _range_center(pool: dict, dex: str) -> int:
+    """Return the pool's current position index.
+
+    Meteora uses DLMM bin IDs (``active_bin_id``); Raydium CLMM and Orca
+    Whirlpool use ticks. Missy may supply ``current_tick`` or reuse
+    ``active_bin_id`` for the tick value.
+    """
+    if dex == "meteora":
+        return int(pool.get("active_bin_id") or 0)
+    for key in ("current_tick", "active_bin_id"):
+        val = pool.get(key)
+        if val not in (None, "", 0, "0"):
+            return int(val)
+    return 0
 
 # Where George's executor looks for pending signals.
 DEFAULT_SIGNALS_DIR = "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals/pending"
@@ -26,6 +56,90 @@ DEFAULT_MEMORY_DIR = "/data/.openclaw/workspace-agents/sheldon/memory"
 
 def _utc_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _read_usdc_balance(balance_cache_path: str = None) -> float:
+    """Return idle USDC balance in USD.
+
+    Resolution order:
+      1. ``SHELDON_IDLE_USDC`` environment variable (USD float).
+      2. ``/data/missy-data/wallet_balances.json`` cache file written by Missy.
+      3. Live Solana RPC lookup of the wallet configured in George's config.
+      4. Fallback 0.0 (OPEN signals are skipped when no capital is known).
+    """
+    env = os.environ.get("SHELDON_IDLE_USDC")
+    if env is not None:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    if balance_cache_path is None:
+        balance_cache_path = "/data/missy-data/wallet_balances.json"
+    try:
+        with open(balance_cache_path, "r", encoding="utf-8") as fh:
+            cache = json.load(fh)
+        usdc = cache.get("USDC", {}) or {}
+        val = float(usdc.get("usd_value") or 0.0)
+        if val > 0:
+            return val
+    except Exception:
+        pass
+    return _fetch_usdc_balance_rpc() or 0.0
+
+
+def _load_george_config() -> tuple:
+    """Return (wallet_public_key, rpc_https_url) from George's config, or (None, None)."""
+    path = "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/config/agent.config.json"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        pubkey = cfg.get("wallet", {}).get("public_key")
+        rpc_url = cfg.get("rpc", {}).get("https_url")
+        return pubkey, rpc_url
+    except Exception:
+        return None, None
+
+
+def _fetch_usdc_balance_rpc() -> float:
+    """Query on-chain USDC balance for the wallet in George's config.
+
+    Returns raw USDC amount as a USD float (USDC has 6 decimals).
+    Returns 0.0 on any failure.
+    """
+    pubkey, rpc_url = _load_george_config()
+    if not pubkey or not rpc_url:
+        return 0.0
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            pubkey,
+            {"mint": USDC_MINT},
+            {"encoding": "jsonParsed"},
+        ],
+    }
+    headers = {"Content-Type": "application/json"}
+    try:
+        req = urllib.request.Request(
+            rpc_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("error"):
+            return 0.0
+        total = 0
+        for item in data.get("result", {}).get("value", []):
+            info = item.get("account", {}).get("data", {}).get("parsed", {}).get("info", {})
+            amount = info.get("tokenAmount", {}).get("amount")
+            if amount:
+                total += int(amount)
+        return total / 1_000_000.0
+    except Exception:
+        return 0.0
 
 
 def _load_active_positions(positions_dir: str) -> dict:
@@ -59,18 +173,19 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
     for v in report.get("verdicts", []):
         action = v.get("action")
         pool_addr = v.get("pool_address")
-
-        # CLOSE / COLLECT_FEES: only emit for protocols George can execute.
         dex = v.get("dex") or "unknown"
-        if dex != "meteora":
+
+        # Only protocols George can execute get a queued signal.
+        if dex not in SUPPORTED_DEXES:
             review.append({
                 "pool_address": pool_addr,
                 "dex": dex,
                 "score": v.get("score"),
                 "evidence": v.get("evidence"),
-                "reason": f"{action} candidate ({dex}); only Meteora signals are queued",
+                "reason": f"{action} candidate ({dex}); unsupported protocol",
             })
             continue
+
         if action in {"CLOSE", "COLLECT_FEES"}:
             lower = v.get("lower_bound")
             upper = v.get("upper_bound")
@@ -82,32 +197,27 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
             signal = {
                 "signal_id": f"sheldon-{base}-{idx}",
                 "action": "close" if action == "CLOSE" else "claim_fees",
+                "dex": dex,
                 "pool_address": pool_addr,
                 "position_id": v.get("position"),
                 "side": "bidirectional",
                 "bin_range": {"lower": lower, "upper": upper},
                 "liquidity": {"amount_x": "0", "amount_y": "0"},
-                "max_slippage_bps": 100,
+                "max_slippage_bps": DEFAULT_MAX_SLIPPAGE_BPS,
                 "reason": f"{action} score={v.get('score')}; evidence={json.dumps(v.get('evidence'))}",
                 "created_at": _utc_iso(),
             }
         elif action == "OPEN_CANDIDATE":
-            # OPEN signals stay in review until allocation logic is finalized.
-            # George currently only executes Meteora DLMM, so non-Meteora
-            # candidates are noted but not queued.
-            dex = v.get("dex") or "unknown"
-            if dex == "meteora":
-                reason = "OPEN candidate; bin_range/liquidity need allocation data"
-            else:
-                reason = f"OPEN candidate ({dex}); only Meteora signals are queued"
-            review.append({
-                "pool_address": pool_addr,
-                "dex": dex,
-                "score": v.get("score"),
-                "evidence": v.get("evidence"),
-                "reason": reason,
-            })
-            continue
+            signal = _build_open_signal(v, idx, base)
+            if signal is None:
+                review.append({
+                    "pool_address": pool_addr,
+                    "dex": dex,
+                    "score": v.get("score"),
+                    "evidence": v.get("evidence"),
+                    "reason": "OPEN candidate; could not build signal (missing enrichment or insufficient capital)",
+                })
+                continue
         else:
             # HOLD, REVIEW, WATCH, IGNORE => no signal.
             continue
@@ -120,6 +230,77 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
         idx += 1
 
     return created, review
+
+
+def _build_open_signal(v: dict, idx: int, base: int) -> dict:
+    """Build a George-schema 'open' signal for a supported pool.
+
+    Allocation rule from owner:
+      - Use idle wallet money held in USDC.
+      - Position value = min(25% of idle USDC, max_position_usd rail).
+      - Minimum total position value = 15 USDC.
+      - Split 50/50 USD between token_x and token_y.
+      - Compute raw amounts from token decimals and prices.
+      - Range = current index +/- max_range_width/2, where the index is a DLMM
+        bin for Meteora and a tick for Raydium CLMM / Orca Whirlpool.
+    """
+    dex = v.get("dex") or "unknown"
+    if dex not in SUPPORTED_DEXES:
+        return None
+    pool = v.get("_pool") or {}
+    if not pool:
+        return None
+
+    # Pull prices and decimals.
+    px_x = float(pool.get("token_x_price_usd") or 0.0)
+    px_y = float(pool.get("token_y_price_usd") or 0.0)
+    dec_x = int(pool.get("token_x_decimals") or 0)
+    dec_y = int(pool.get("token_y_decimals") or 0)
+    if px_x <= 0 or px_y <= 0 or dec_x <= 0 or dec_y <= 0:
+        return None
+
+    center = _range_center(pool, dex)
+    if center == 0:
+        return None
+
+    idle_usdc = _read_usdc_balance()
+    if idle_usdc <= 0:
+        return None
+
+    # 25% of idle USDC, capped by the per-position rail, with a hard minimum.
+    position_usd = min(idle_usdc * 0.25, DEFAULT_MAX_POSITION_USD)
+    if position_usd < MIN_POSITION_USD:
+        return None
+
+    # 50/50 USD split.
+    half_usd = position_usd / 2.0
+    amount_x = int((half_usd / px_x) * (10 ** dec_x))
+    amount_y = int((half_usd / px_y) * (10 ** dec_y))
+    if amount_x <= 0 or amount_y <= 0:
+        return None
+
+    half_width = max(1, DEFAULT_MAX_RANGE_WIDTH // 2)
+    lower = center - half_width
+    upper = center + half_width
+
+    return {
+        "signal_id": f"sheldon-{base}-{idx}",
+        "action": "open",
+        "dex": dex,
+        "pool_address": pool.get("pool_address"),
+        "side": "bidirectional",
+        "bin_range": {"lower": lower, "upper": upper},
+        "liquidity": {
+            "amount_x": str(amount_x),
+            "amount_y": str(amount_y),
+        },
+        "max_slippage_bps": DEFAULT_MAX_SLIPPAGE_BPS,
+        "reason": (
+            f"OPEN score={v.get('score')} dex={dex} "
+            f"position_usd={position_usd:.2f} center={center}"
+        ),
+        "created_at": _utc_iso(),
+    }
 
 
 def append_log(report: dict, memory_dir: str, signals_created: list, review: list):

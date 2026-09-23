@@ -95,11 +95,56 @@ else: 15 * clamp(1 - (days - 14) / 28, 0, 1)
 
 - Decays linearly from 15 to 0 over 14→42 days (3x horizon)
 
-## Verdict thresholds
+## Verdict Thresholds
 
 - Pool: open >= 70.0, watch >= 55.0
 - Position: close < 40.0, review >= 40.0 and < 60.0, hold >= 60.0
 - Collect fees: HOLD position with fees_usd >= 10.0
+
+## Signal Building
+
+### `_build_open_signal(v, idx, base)`
+
+Builds a George-schema `open` signal for supported DEXes.
+
+**Requirements** (returns `None` if any unmet):
+- `dex` in `SUPPORTED_DEXES` (meteora, raydium, orca)
+- `_pool` present in verdict
+- `token_x_price_usd`, `token_y_price_usd` > 0
+- `token_x_decimals`, `token_y_decimals` > 0
+- `center` (bin/tick index) != 0
+- `idle_usdc` > 0
+
+**Allocation rule**:
+```
+position_usd = min(idle_usdc * 0.25, DEFAULT_MAX_POSITION_USD)
+               >= MIN_POSITION_USD (15.0)
+
+half_usd = position_usd / 2
+amount_x = int((half_usd / px_x) * 10^dec_x)
+amount_y = int((half_usd / px_y) * 10^dec_y)
+
+half_width = max(1, DEFAULT_MAX_RANGE_WIDTH // 2)  # 100
+bin_range = [center - 100, center + 100]
+```
+
+### `_range_center(pool, dex)`
+
+Returns the pool's current position index:
+- **Meteora**: `active_bin_id` (DLMM bin ID)
+- **Raydium/Orca**: `current_tick` first, then `active_bin_id` fallback
+
+### `_read_usdc_balance()`
+
+Resolution order:
+1. `SHELDON_IDLE_USDC` env var (USD float)
+2. `/data/missy-data/wallet_balances.json` → `USDC.usd_value`
+3. Solana RPC `getTokenAccountsByOwner` via George's config
+4. 0.0 (skips OPEN signal)
+
+### `_fetch_usdc_balance_rpc()`
+
+Queries Solana RPC for the wallet in George's config (`agent.config.json`). Returns raw USDC balance / 1_000_000 (6 decimals).
 
 ## CLI Arguments
 
@@ -122,3 +167,14 @@ else: 15 * clamp(1 - (days - 14) / 28, 0, 1)
 | `--memory-dir` | `/data/.openclaw/.../sheldon/memory` | Daily markdown log directory |
 | `--json` | — | Print full JSON report to stdout |
 | `--max-age-seconds` | `3900.0` | Max age (seconds) for data freshness |
+
+## Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `MIN_POSITION_USD` | `15.0` | Minimum position USD value |
+| `DEFAULT_MAX_POSITION_USD` | `100.0` | Maximum position USD value |
+| `DEFAULT_MAX_RANGE_WIDTH` | `200` | Max range width in bins/ticks |
+| `DEFAULT_MAX_SLIPPAGE_BPS` | `100` | Max slippage in basis points |
+| `SUPPORTED_DEXES` | `{"meteora", "raydium", "orca"}` | DEXes George can execute |
+| `USDC_MINT` | `EPjFWdd5...TDtWv` | USDC mint address on Solana |
