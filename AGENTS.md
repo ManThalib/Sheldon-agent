@@ -24,7 +24,17 @@ python3 /data/.openclaw/workspace-agents/sheldon/scoring/run_cycle.py --write-si
 
 That script reads the newest pool and position scans, computes scores with
 `lp_scoring.py`, and writes George-schema signal files for any actionable
-verdict.  No agent wake is needed on no-signal cycles.
+verdict.
+
+## George wake rule
+After the script finishes, if any signal files were written to George's
+`signals/pending/` directory, trigger the `george-signal-wake` doorbell
+automation immediately. The script does this automatically via
+`openclaw automations run <doorbell_id> --wait`. Do not send a separate
+`sessions_send`.
+
+This only happens when signals were actually written; no wake is needed on
+no-signal cycles. The 2-minute doorbell automation remains as a fallback.
 
 ## When I wake
 I am woken only for manual or exceptional work:

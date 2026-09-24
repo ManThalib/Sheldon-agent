@@ -421,7 +421,7 @@ def score_position(pos: dict, pools_by_addr: dict = None) -> dict:
 # Main cycle
 # --------------------------------------------------------------------------
 def run_cycle(pools_dir: str, positions_dir: str, max_age_seconds: float = 3900.0) -> dict:
-    report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime()),
               "sources": {}, "pool_scores": [], "position_scores": [],
               "verdicts": [], "failures": []}
 

@@ -14,10 +14,12 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 import urllib.request
 import urllib.error
+from pathlib import Path
 
 from lp_scoring import newest_file, load_json
 import lp_scoring
@@ -38,12 +40,12 @@ def _range_center(pool: dict, dex: str) -> int:
     """Return the pool's current position index.
 
     Meteora uses DLMM bin IDs (``active_bin_id``); Raydium CLMM and Orca
-    Whirlpool use ticks. Missy may supply ``current_tick`` or reuse
-    ``active_bin_id`` for the tick value.
+    Whirlpool use ticks. Missy may supply ``current_tick``,
+    ``current_tick_index`` or reuse ``active_bin_id`` for the tick value.
     """
     if dex == "meteora":
         return int(pool.get("active_bin_id") or 0)
-    for key in ("current_tick", "active_bin_id"):
+    for key in ("current_tick", "current_tick_index", "active_bin_id"):
         val = pool.get(key)
         if val not in (None, "", 0, "0"):
             return int(val)
@@ -55,7 +57,8 @@ DEFAULT_MEMORY_DIR = "/data/.openclaw/workspace-agents/sheldon/memory"
 
 
 def _utc_iso():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # Use Asia/Shanghai (UTC+8) as the canonical timezone for timestamps.
+    return time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime())
 
 
 def _read_usdc_balance(balance_cache_path: str = None) -> float:
@@ -303,6 +306,26 @@ def _build_open_signal(v: dict, idx: int, base: int) -> dict:
     }
 
 
+def _wake_george(signals_created: list, review: list):
+    """Trigger the George signal doorbell immediately when signals are written.
+
+    The doorbell automation checks signals/pending/ and sends George's main
+    session a wake message only when fresh files are detected. The regular
+    2-minute schedule remains as a fallback; this call shortens latency.
+    """
+    if not signals_created:
+        return
+
+    # Doorbell automation ID (george-signal-wake).
+    doorbell_id = "26a163bb-5e85-4fe8-ba99-8e584bc2e09e"
+    cmd = ["openclaw", "automations", "run", doorbell_id, "--wait"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+    except Exception as exc:
+        # Fallback doorbell will catch it on its next 2-minute tick; log failure.
+        print(f"WAKE_GEORGE_FAILED: {exc}", file=sys.stderr)
+
+
 def append_log(report: dict, memory_dir: str, signals_created: list, review: list):
     os.makedirs(memory_dir, exist_ok=True)
     log_path = os.path.join(memory_dir, time.strftime("%Y-%m-%d") + ".md")
@@ -370,8 +393,15 @@ def main() -> int:
     review = []
     if args.write_signals:
         signals_created, review = write_signals(report, args.signals_dir, args.positions_dir)
+        _wake_george(signals_created, review)
 
     append_log(report, args.memory_dir, signals_created, review)
+
+    # Emit a machine-readable wake hint so the calling Sheldon session can
+    # notify George immediately when actionable signals were written.
+    if signals_created:
+        summary = ", ".join(Path(p).name for p in signals_created)
+        print(f"WAKE_GEORGE: {len(signals_created)} signal(s) -> {summary}")
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)
