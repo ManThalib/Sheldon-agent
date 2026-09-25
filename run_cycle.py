@@ -58,7 +58,8 @@ DEFAULT_MEMORY_DIR = "/data/.openclaw/workspace-agents/sheldon/memory"
 
 def _utc_iso():
     # Use Asia/Shanghai (UTC+8) as the canonical timezone for timestamps.
-    return time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime())
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
 def _read_usdc_balance(balance_cache_path: str = None) -> float:
@@ -91,13 +92,13 @@ def _read_usdc_balance(balance_cache_path: str = None) -> float:
 
 
 def _load_george_config() -> tuple:
-    """Return (wallet_public_key, rpc_https_url) from George's config, or (None, None)."""
+    """Return (wallet_public_key, rpc_https_url) from env or George's config."""
     path = "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/config/agent.config.json"
     try:
         with open(path, "r", encoding="utf-8") as fh:
             cfg = json.load(fh)
-        pubkey = cfg.get("wallet", {}).get("public_key")
-        rpc_url = cfg.get("rpc", {}).get("https_url")
+        pubkey = os.environ.get("SOLANA_PUBLIC_WALLET", cfg.get("wallet", {}).get("public_key"))
+        rpc_url = os.environ.get("SOLANA_RPC_URL", cfg.get("rpc", {}).get("https_url"))
         return pubkey, rpc_url
     except Exception:
         return None, None

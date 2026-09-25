@@ -1,0 +1,55 @@
+{
+  "_comment": "Sheldon scoring configuration. Loaded at startup; invalid file = fatal error (fail-closed). Delete a key to fall back to the built-in default. Weights must sum to 100 per profile.",
+  "pool_profiles": {
+    "stable_stable": {
+      "weights": {"fee_yield": 35.0, "turnover": 15.0, "depth": 15.0,
+                  "depeg_safety": 25.0, "volatility_fit": 10.0},
+      "vol_peak_pct": 0.5,
+      "apr_cap_pct": 100.0
+    },
+    "stable_bluechip": {
+      "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
+                  "volatility_fit": 20.0, "depeg_safety": 15.0},
+      "vol_peak_pct": 8.0,
+      "apr_cap_pct": 300.0
+    },
+    "bluechip_bluechip": {
+      "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
+                  "volatility_fit": 35.0},
+      "vol_peak_pct": 10.0,
+      "apr_cap_pct": 300.0
+    }
+  },
+  "position_profiles": {
+    "stable_stable": {
+      "weights": {"range_status": 35.0, "fee_capture": 25.0,
+                  "depeg_exposure": 25.0, "staleness": 15.0}
+    },
+    "stable_bluechip": {
+      "weights": {"range_status": 30.0, "fee_capture": 20.0,
+                  "il_risk": 30.0, "staleness": 20.0}
+    },
+    "bluechip_bluechip": {
+      "weights": {"range_status": 30.0, "fee_capture": 20.0,
+                  "il_risk": 30.0, "staleness": 20.0}
+    }
+  },
+  "pool_thresholds": {"open": 70.0, "watch": 55.0},
+  "position_thresholds": {"close": 40.0, "review": 60.0},
+  "constants": {
+    "depth_min_usd": 50000.0,
+    "depth_max_usd": 5000000.0,
+    "depeg_zero_dist": 0.005,
+    "stale_grace_days": 30.0,
+    "stale_zero_days": 120.0,
+    "collect_min_usd": 5.0,
+    "collect_pct_of_value": 0.01,
+    "turnover_max": 5.0,
+    "unknown_credit": 0.5,
+    "il_zero_pct": 10.0,
+    "il_vol_window_days": 1.0,
+    "il_conc_full_width_ticks": 2000,
+    "il_conc_max": 4.0,
+    "fee_expect_max_days": 30.0
+  }
+}
