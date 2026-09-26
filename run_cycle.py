@@ -21,7 +21,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-from lp_scoring import newest_file, load_json
+from lp_scoring import newest_file, load_json, ConfigError
 import lp_scoring
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDtWv"
@@ -380,7 +380,11 @@ def main() -> int:
     ap.add_argument("--max-age-seconds", type=float, default=3900.0)
     args = ap.parse_args()
 
-    report = lp_scoring.run_cycle(args.pools_dir, args.positions_dir, args.max_age_seconds)
+    try:
+        report = lp_scoring.run_cycle(args.pools_dir, args.positions_dir, args.max_age_seconds)
+    except ConfigError as exc:
+        print(f"CONFIG ERROR: {exc}", file=sys.stderr)
+        return 1
 
     if report.get("failures"):
         err = "; ".join(report["failures"])
