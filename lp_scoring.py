@@ -37,6 +37,8 @@ import time
 from copy import deepcopy
 from functools import lru_cache
 
+from capital import summarize_wallet
+
 # --------------------------------------------------------------------------
 # Configuration — defaults mirror profiles.json. A valid profiles.json next
 # to this file overrides any subset. Invalid file => fatal (fail-closed).
@@ -206,6 +208,41 @@ def newest_file(directory: str, prefix: str):
         if not p.endswith((".failed", ".invalid"))
     )
     return paths[-1] if paths else None
+
+
+def load_wallet_scan(directory: str) -> dict:
+    """Load and parse the newest Missy wallet scan.
+
+    Returns a capital summary dict (see capital.summarize_wallet).
+    On missing/malformed data, returns a zeroed summary with an error.
+    """
+    path = newest_file(directory, "wallet_scan")
+    if not path:
+        return _empty_wallet("no wallet scan found")
+    try:
+        data = load_json(path)
+    except Exception as exc:
+        return _empty_wallet(f"wallet scan unreadable: {exc}")
+    try:
+        summary = summarize_wallet(data)
+        summary["source"] = path
+        return summary
+    except Exception as exc:
+        return _empty_wallet(f"wallet scan malformed: {exc}")
+
+
+def _empty_wallet(reason: str) -> dict:
+    return {
+        "wallet": None,
+        "total_usd": 0.0,
+        "idle_usdc": 0.0,
+        "dust_total_usdc": 0.0,
+        "dust_assets": [],
+        "reserved_total_usdc": 0.0,
+        "deployable_usdc": 0.0,
+        "errors": [reason],
+        "source": None,
+    }
 
 
 def load_json(path: str):
@@ -661,7 +698,8 @@ def score_position(pos: dict, pools_by_addr: dict = None) -> dict:
 # --------------------------------------------------------------------------
 # Main cycle
 # --------------------------------------------------------------------------
-def run_cycle(pools_dir: str, positions_dir: str, max_age_seconds: float = 3900.0) -> dict:
+def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
+              max_age_seconds: float = 3900.0) -> dict:
     report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime()),
               "sources": {}, "pool_scores": [], "position_scores": [],
               "verdicts": [], "failures": []}
@@ -669,6 +707,14 @@ def run_cycle(pools_dir: str, positions_dir: str, max_age_seconds: float = 3900.
     pool_path = newest_file(pools_dir, "pool_scan")
     pos_path = newest_file(positions_dir, "position_scan")
     report["sources"] = {"pools": pool_path, "positions": pos_path}
+
+    # Load wallet scan if a directory was supplied. A missing wallet does not
+    # fail the cycle; it simply makes OPEN signals ineligible.
+    if wallet_scans_dir:
+        report["wallet"] = load_wallet_scan(wallet_scans_dir)
+        report["sources"]["wallet_scan"] = report["wallet"].get("source")
+    else:
+        report["wallet"] = _empty_wallet("wallet_scans_dir not provided")
 
     pools, positions = [], []
     if not pool_path or not is_fresh(pool_path, max_age_seconds):
@@ -751,10 +797,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Sheldon LP scoring engine")
     ap.add_argument("--pools-dir", default="/data/missy-data/pool_screens")
     ap.add_argument("--positions-dir", default="/data/missy-data/position_scans")
+    ap.add_argument("--wallet-scans-dir", default="/data/missy-data/wallet_scans")
     ap.add_argument("--json", action="store_true", help="full JSON report")
     args = ap.parse_args()
     try:
-        report = run_cycle(args.pools_dir, args.positions_dir)
+        report = run_cycle(args.pools_dir, args.positions_dir, args.wallet_scans_dir)
     except ConfigError as exc:
         print(f"CONFIG ERROR: {exc}", file=sys.stderr)
         return 1
