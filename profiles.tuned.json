@@ -1,0 +1,171 @@
+{
+  "generated_at": "2026-09-28T23:19:25+08:00",
+  "baseline": {
+    "train": {
+      "mean_pnl_usd": -1.41,
+      "hit_rate_pct": 0.0,
+      "max_drawdown_usd": -2.94,
+      "n": 90
+    },
+    "val": {
+      "mean_pnl_usd": -1.09,
+      "hit_rate_pct": 0.0,
+      "max_drawdown_usd": -2.0,
+      "n": 82
+    }
+  },
+  "best": {
+    "name": "candidate_1",
+    "weights": {
+      "stable_stable": {
+        "fee_yield": 38.51,
+        "turnover": 12.67,
+        "depth": 14.23,
+        "depeg_safety": 23.18,
+        "volatility_fit": 11.41
+      },
+      "stable_bluechip": {
+        "fee_yield": 32.33,
+        "turnover": 23.29,
+        "depth": 12.61,
+        "volatility_fit": 19.51,
+        "depeg_safety": 12.26
+      },
+      "bluechip_bluechip": {
+        "fee_yield": 29.71,
+        "turnover": 22.37,
+        "depth": 13.57,
+        "volatility_fit": 34.35
+      }
+    },
+    "train": {
+      "mean_pnl_usd": -1.36,
+      "hit_rate_pct": 0.0,
+      "max_drawdown_usd": -2.94,
+      "n": 115
+    },
+    "val": {
+      "mean_pnl_usd": -1.07,
+      "hit_rate_pct": 0.0,
+      "max_drawdown_usd": -2.0,
+      "n": 80
+    },
+    "score": -1.07
+  },
+  "candidates": [
+    {
+      "name": "candidate_1",
+      "weights": {
+        "stable_stable": {
+          "fee_yield": 38.51,
+          "turnover": 12.67,
+          "depth": 14.23,
+          "depeg_safety": 23.18,
+          "volatility_fit": 11.41
+        },
+        "stable_bluechip": {
+          "fee_yield": 32.33,
+          "turnover": 23.29,
+          "depth": 12.61,
+          "volatility_fit": 19.51,
+          "depeg_safety": 12.26
+        },
+        "bluechip_bluechip": {
+          "fee_yield": 29.71,
+          "turnover": 22.37,
+          "depth": 13.57,
+          "volatility_fit": 34.35
+        }
+      },
+      "train": {
+        "mean_pnl_usd": -1.36,
+        "hit_rate_pct": 0.0,
+        "max_drawdown_usd": -2.94,
+        "n": 115
+      },
+      "val": {
+        "mean_pnl_usd": -1.07,
+        "hit_rate_pct": 0.0,
+        "max_drawdown_usd": -2.0,
+        "n": 80
+      },
+      "score": -1.07
+    },
+    {
+      "name": "candidate_9",
+      "weights": {
+        "stable_stable": {
+          "fee_yield": 33.83,
+          "turnover": 12.64,
+          "depth": 16.89,
+          "depeg_safety": 27.75,
+          "volatility_fit": 8.89
+        },
+        "stable_bluechip": {
+          "fee_yield": 30.81,
+          "turnover": 20.3,
+          "depth": 12.57,
+          "volatility_fit": 21.5,
+          "depeg_safety": 14.82
+        },
+        "bluechip_bluechip": {
+          "fee_yield": 33.98,
+          "turnover": 20.63,
+          "depth": 12.23,
+          "volatility_fit": 33.16
+        }
+      },
+      "train": {
+        "mean_pnl_usd": -1.37,
+        "hit_rate_pct": 0.0,
+        "max_drawdown_usd": -2.94,
+        "n": 78
+      },
+      "val": {
+        "mean_pnl_usd": -1.07,
+        "hit_rate_pct": 0.0,
+        "max_drawdown_usd": -2.0,
+        "n": 81
+      },
+      "score": -1.07
+    },
+    {
+      "name": "candidate_3",
+      "weights": {
+        "stable_stable": {
+          "fee_yield": 36.32,
+          "turnover": 14.23,
+          "depth": 15.34,
+          "depeg_safety": 24.87,
+          "volatility_fit": 9.24
+        },
+        "stable_bluechip": {
+          "fee_yield": 32.92,
+          "turnover": 17.56,
+          "depth": 14.13,
+          "volatility_fit": 20.89,
+          "depeg_safety": 14.5
+        },
+        "bluechip_bluechip": {
+          "fee_yield": 34.4,
+          "turnover": 20.65,
+          "depth": 16.26,
+          "volatility_fit": 28.69
+        }
+      },
+      "train": {
+        "mean_pnl_usd": -1.36,
+        "hit_rate_pct": 0.0,
+        "max_drawdown_usd": -2.94,
+        "n": 86
+      },
+      "val": {
+        "mean_pnl_usd": -1.08,
+        "hit_rate_pct": 0.0,
+        "max_drawdown_usd": -2.0,
+        "n": 82
+      },
+      "score": -1.08
+    }
+  ]
+}

@@ -241,6 +241,10 @@ Signal rails (in run_cycle.py): `MIN_POSITION_USD` 15, `DEFAULT_MAX_POSITION_USD
 
 ## Tests
 
-`python3 test_lp_scoring.py -v` — 43 tests covering config validation,
-classification, every pool/position component, estimation math, the
-open/close data-quality rule, and two end-to-end cycles on synthetic scans.
+```
+python3 -m unittest test_lp_scoring test_run_cycle test_dynamic
+```
+
+Covers config validation, classification, every pool/position component,
+estimation math, the open/close data-quality rule, end-to-end cycles on
+synthetic scans, and the dynamic calibration layer.

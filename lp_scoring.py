@@ -38,6 +38,7 @@ from copy import deepcopy
 from functools import lru_cache
 
 from capital import summarize_wallet
+import dynamic
 
 # --------------------------------------------------------------------------
 # Configuration — defaults mirror profiles.json. A valid profiles.json next
@@ -95,6 +96,72 @@ DEFAULT_CONFIG = {
         "il_conc_max": 4.0,
         "fee_expect_max_days": 30.0,
     },
+    "dynamic": {
+        "enabled": True,
+        "percentile": {
+            "enabled": True,
+            "components": ["fee_yield", "turnover"],
+            "history_scans": 60,
+            "min_samples": 20,
+            "blend_alpha": 0.7,
+        },
+        "regime": {
+            "enabled": True,
+            "history_scans": 30,
+            "high_vol_mult": 2.0,
+            "low_vol_mult": 0.5,
+            "fee_boom_apr_pct": 100.0,
+            "shifts": {
+                "low_vol": {
+                    "fee_yield": 1.15,
+                    "turnover": 1.0,
+                    "depth": 1.05,
+                    "volatility_fit": 0.7,
+                    "depeg_safety": 1.0,
+                },
+                "high_vol": {
+                    "fee_yield": 0.8,
+                    "turnover": 1.05,
+                    "depth": 1.0,
+                    "volatility_fit": 1.4,
+                    "depeg_safety": 1.3,
+                },
+                "fee_boom": {
+                    "fee_yield": 0.7,
+                    "turnover": 1.2,
+                    "depth": 1.2,
+                    "volatility_fit": 1.0,
+                    "depeg_safety": 1.1,
+                },
+                "cracked_peg": {
+                    "fee_yield": 0.6,
+                    "turnover": 1.0,
+                    "depth": 1.0,
+                    "volatility_fit": 0.9,
+                    "depeg_safety": 2.0,
+                },
+                "neutral": {},
+            },
+        },
+        "thresholds": {
+            "enabled": True,
+            "min_pools": 10,
+            "open_quantile": 0.90,
+            "watch_quantile": 0.70,
+            "floor_open": 55.0,
+            "ceil_open": 90.0,
+            "floor_watch": 40.0,
+            "ceil_watch": 80.0,
+        },
+        "position_pnl": {
+            "enabled": True,
+            "horizon_days": 1.0,
+            "entry_cost_bps": 50.0,
+            "exit_cost_bps": 50.0,
+            "claim_cost_usd": 0.02,
+            "min_pnl_margin_usd": 0.01,
+        },
+    },
 }
 
 U64_MAX = (1 << 64) - 1
@@ -138,6 +205,23 @@ def _validate_config(cfg: dict) -> None:
     for key in ("depeg_zero_dist", "il_zero_pct", "fee_expect_max_days"):
         if float(c.get(key, 0)) <= 0:
             raise ConfigError(f"constants.{key}: must be > 0")
+
+    d = cfg.get("dynamic") or {}
+    if d:
+        if not isinstance(d, dict):
+            raise ConfigError("dynamic: expected object")
+        pctl = d.get("percentile") or {}
+        if pctl:
+            alpha = float(pctl.get("blend_alpha", 0.7))
+            if not 0.0 <= alpha <= 1.0:
+                raise ConfigError("dynamic.percentile.blend_alpha must be in [0,1]")
+        thr = d.get("thresholds") or {}
+        if thr:
+            for q in ("open_quantile", "watch_quantile"):
+                if not 0.0 <= float(thr.get(q, 0.5)) <= 1.0:
+                    raise ConfigError(f"dynamic.thresholds.{q} must be in [0,1]")
+            if float(thr.get("watch_quantile", 0.5)) > float(thr.get("open_quantile", 0.5)):
+                raise ConfigError("dynamic.thresholds.watch_quantile must <= open_quantile")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -216,7 +300,7 @@ def load_wallet_scan(directory: str) -> dict:
     Returns a capital summary dict (see capital.summarize_wallet).
     On missing/malformed data, returns a zeroed summary with an error.
     """
-    path = newest_file(directory, "wallet_scan")
+    path = newest_file(directory, "wallet_screen")
     if not path:
         return _empty_wallet("no wallet scan found")
     try:
@@ -370,23 +454,61 @@ def score_pool_depeg_safety(pool: dict, max_pts: float, sym_x, sym_y) -> float:
     return round(max_pts * min(sides), 2)
 
 
-def score_pool(pool: dict) -> dict:
+def pool_verdict(score: float, thresholds: dict) -> str:
+    """Map a pool score to a verdict given thresholds."""
+    if score >= thresholds["open"]:
+        return "OPEN_CANDIDATE"
+    if score >= thresholds["watch"]:
+        return "WATCH"
+    return "IGNORE"
+
+
+def _maybe_blend(name: str, abs_pts: float, max_pts: float, raw_value: float,
+                 pair_class: str, ctx: dict) -> float:
+    """Blend absolute component score with rolling percentile, if available."""
+    if not ctx or not max_pts:
+        return abs_pts
+    norms = (ctx.get("norms") or {}).get(pair_class)
+    if norms is None or name not in norms:
+        return abs_pts
+    rank = dynamic.percentile_rank(norms[name], raw_value)
+    alpha = float(ctx.get("blend_alpha", 0.7))
+    norm_abs = abs_pts / max_pts if max_pts else 0.0
+    return round(max_pts * (alpha * rank + (1.0 - alpha) * norm_abs), 2)
+
+
+def score_pool(pool: dict, ctx: dict = None) -> dict:
     cfg = get_config()
     pair_class, sym_x, sym_y = classify_pair(pool)
+    static_thr = cfg["pool_thresholds"]
+    adaptive_thr = (ctx or {}).get("thresholds")
+    thresholds = adaptive_thr if adaptive_thr else static_thr
+    regime_name = ((ctx or {}).get("regime") or {}).get("name")
 
     if pair_class in ("off_universe", "unknown"):
         return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
                 "dex": pool.get("dex"), "pair_class": pair_class,
                 "pair": [sym_x, sym_y], "score": 0.0, "components": {},
                 "reason": "off-universe pair: policy is stables/high-caps only",
-                "verdict": "IGNORE", "_pool": pool}
+                "verdict": "IGNORE", "_pool": pool,
+                "dynamic": {"regime": regime_name, "thresholds": "static"}}
 
     profile = cfg["pool_profiles"][pair_class]
-    w = profile["weights"]
+    w = (ctx or {}).get("weights", {}).get(pair_class) or profile["weights"]
     reasons = []
+
+    fee_abs = score_pool_fee_yield(pool, w["fee_yield"], profile["apr_cap_pct"])
+    turnover_abs = score_pool_turnover(pool, w["turnover"])
+    turnover_raw = 0.0
+    if float(pool.get("tvl") or 0.0) > 0:
+        turnover_raw = float(pool.get("volume_window") or 0.0) / float(pool.get("tvl"))
+
     components = {
-        "fee_yield": score_pool_fee_yield(pool, w["fee_yield"], profile["apr_cap_pct"]),
-        "turnover": score_pool_turnover(pool, w["turnover"]),
+        "fee_yield": _maybe_blend("fee_yield", fee_abs, w["fee_yield"],
+                                   float(pool.get("realized_fee_apr") or 0.0),
+                                   pair_class, ctx),
+        "turnover": _maybe_blend("turnover", turnover_abs, w["turnover"],
+                                 turnover_raw, pair_class, ctx),
         "depth": score_pool_depth(pool, w["depth"]),
         "volatility_fit": score_pool_volatility_fit(
             pool, w["volatility_fit"], profile["vol_peak_pct"]),
@@ -401,20 +523,16 @@ def score_pool(pool: dict) -> dict:
         reasons.append("volatility unknown")
 
     total = round(clamp(sum(components.values())), 2)
-    thr = cfg["pool_thresholds"]
-    if total >= thr["open"]:
-        verdict = "OPEN_CANDIDATE"
-    elif total >= thr["watch"]:
-        verdict = "WATCH"
-    else:
-        verdict = "IGNORE"
+    verdict = pool_verdict(total, thresholds)
     if verdict == "OPEN_CANDIDATE":
-        reasons.append(f"score {total} >= open threshold {thr['open']}")
+        reasons.append(f"score {total} >= open threshold {thresholds['open']}")
     return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
             "dex": pool.get("dex"), "pair_class": pair_class,
             "pair": [sym_x, sym_y], "score": total, "components": components,
             "reason": "; ".join(reasons) if reasons else "all inputs present",
-            "verdict": verdict, "_pool": pool}
+            "verdict": verdict, "_pool": pool,
+            "dynamic": {"regime": regime_name,
+                        "thresholds": ("adaptive" if adaptive_thr else "static")}}
 
 
 # --------------------------------------------------------------------------
@@ -609,7 +727,7 @@ def score_position_staleness(pos: dict, max_pts: float) -> tuple:
     return round(max_pts * clamp(frac, 0.0, 1.0), 2), True
 
 
-def score_position(pos: dict, pools_by_addr: dict = None) -> dict:
+def score_position(pos: dict, pools_by_addr: dict = None, ctx: dict = None) -> dict:
     cfg = get_config()
     pair_class, sym_x, sym_y = classify_pair(pos)
     pool = (pools_by_addr or {}).get(pos.get("pool_address"))
@@ -651,10 +769,28 @@ def score_position(pos: dict, pools_by_addr: dict = None) -> dict:
     total = round(clamp(sum(components.values())), 2)
     thr = cfg["position_thresholds"]
 
+    # Dynamic expected-PnL override (only when inputs are complete).
+    pnl = None
+    pnl_cfg = (ctx or {}).get("position_pnl") if ctx else None
+    if pnl_cfg and pnl_cfg.get("enabled"):
+        pnl = dynamic.expected_pnl_verdict(pos, pool, cfg)
+
     # --- Open/close separation -------------------------------------------
-    # CLOSE requires known data for every component. Any unknown input caps
+    # Close requires known data for every component. Any unknown input caps
     # the verdict at REVIEW: missing data is a data problem, not evidence.
-    if total < thr["close"] and unknown_parts:
+    if pnl and pnl.get("decisive"):
+        action = pnl["action"]
+        if unknown_parts and action in ("CLOSE", "REBALANCE"):
+            verdict = "REVIEW"
+            reason = (f"PNL suggests {action} but unknown: "
+                      f"{', '.join(unknown_parts)}")
+        else:
+            verdict = action
+            reason = (f"PNL decision: {action} (HOLD={pnl['expected_hold_usd']}, "
+                      f"CLOSE={pnl['expected_close_usd']}, "
+                      f"REBALANCE={pnl['expected_rebalance_usd']}, "
+                      f"margin={pnl['margin_usd']})")
+    elif total < thr["close"] and unknown_parts:
         verdict = "REVIEW"
         reason = (f"score {total} < close threshold {thr['close']} but "
                   f"unknown: {', '.join(unknown_parts)}")
@@ -692,6 +828,7 @@ def score_position(pos: dict, pools_by_addr: dict = None) -> dict:
             "data_quality": {"unknown_components": unknown_parts,
                              "policy_close": False},
             "reason": reason,
+            "expected_pnl": pnl,
             "note": reason}
 
 
@@ -700,6 +837,7 @@ def score_position(pos: dict, pools_by_addr: dict = None) -> dict:
 # --------------------------------------------------------------------------
 def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
               max_age_seconds: float = 3900.0) -> dict:
+    cfg = get_config()
     report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime()),
               "sources": {}, "pool_scores": [], "position_scores": [],
               "verdicts": [], "failures": []}
@@ -733,10 +871,20 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
     if report["failures"]:
         return report
 
+    # Dynamic calibration context: percentiles, regime weights, PnL config.
+    ctx = None
+    try:
+        ctx = dynamic.build_context(pools_dir, pool_path, pools, cfg)
+    except Exception as _exc:
+        import traceback
+        report["failures"].append(f"dynamic context failed: {_exc}")
+        report["dynamic_error"] = traceback.format_exc()
+
     pools_by_addr = {}
     open_pools = {}
+    # First pass: raw scores with regime-adjusted components/blending.
     for pool in pools:
-        s = score_pool(pool)
+        s = score_pool(pool, ctx)
         report["pool_scores"].append(s)
         if pool.get("pool_address"):
             pools_by_addr[pool["pool_address"]] = pool
@@ -749,8 +897,52 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
                 "evidence": s["components"], "reason": s.get("reason"),
                 "_pool": s.get("_pool")})
 
+    # Adaptive thresholds derived from the scored universe.
+    if ctx is not None:
+        scores = [s["score"] for s in report["pool_scores"]
+                  if s["pair_class"] not in ("off_universe", "unknown")]
+        adaptive_thr = dynamic.adaptive_pool_thresholds(scores, cfg)
+        if adaptive_thr:
+            ctx["thresholds"] = adaptive_thr
+            report["dynamic_thresholds"] = adaptive_thr
+            # Re-tag verdicts using the adaptive thresholds.
+            for s in report["pool_scores"]:
+                if s["pair_class"] in ("off_universe", "unknown"):
+                    continue
+                s["verdict"] = pool_verdict(s["score"], adaptive_thr)
+                if s["verdict"] == "OPEN_CANDIDATE":
+                    s["reason"] = (f"adaptive: score {s['score']} >= open threshold "
+                                   f"{adaptive_thr['open']}")
+                    open_pools[s["pool_address"]] = s["score"]
+                elif s["verdict"] == "WATCH":
+                    s["reason"] = (f"adaptive: score {s['score']} >= watch threshold "
+                                   f"{adaptive_thr['watch']}")
+                else:
+                    s["reason"] = (f"adaptive: score {s['score']} < watch threshold "
+                                   f"{adaptive_thr['watch']}")
+                s["dynamic"]["thresholds"] = "adaptive"
+            # Rebuild verdicts list for open candidates after re-tag.
+            open_pools = {s["pool_address"]: s["score"]
+                          for s in report["pool_scores"]
+                          if s["verdict"] == "OPEN_CANDIDATE" and s.get("pool_address")}
+            report["verdicts"] = [v for v in report["verdicts"]
+                                   if v.get("action") != "OPEN_CANDIDATE"]
+            for s in report["pool_scores"]:
+                if s["verdict"] == "OPEN_CANDIDATE":
+                    report["verdicts"].append({
+                        "action": "OPEN_CANDIDATE",
+                        "pool": s["pool"],
+                        "pool_address": s["pool_address"],
+                        "dex": s.get("dex"),
+                        "pair_class": s.get("pair_class"),
+                        "score": s["score"],
+                        "evidence": s.get("components"),
+                        "reason": s.get("reason"),
+                        "_pool": s.get("_pool"),
+                    })
+
     for pos in positions:
-        s = score_position(pos, pools_by_addr)
+        s = score_position(pos, pools_by_addr, ctx)
         report["position_scores"].append(s)
         verdict = s["verdict"]
         if verdict in {"CLOSE", "REVIEW"} and s["pool_address"] in open_pools:
@@ -767,6 +959,7 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
             "reason": s.get("reason"),
             "note": s.get("note")})
 
+    report["dynamic"] = ctx
     return report
 
 
@@ -797,7 +990,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Sheldon LP scoring engine")
     ap.add_argument("--pools-dir", default="/data/missy-data/pool_screens")
     ap.add_argument("--positions-dir", default="/data/missy-data/position_scans")
-    ap.add_argument("--wallet-scans-dir", default="/data/missy-data/wallet_scans")
+    ap.add_argument("--wallet-scans-dir", default="/data/missy-data/wallet_screens")
     ap.add_argument("--json", action="store_true", help="full JSON report")
     args = ap.parse_args()
     try:

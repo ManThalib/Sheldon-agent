@@ -4,17 +4,20 @@
 
 Sheldon is a deterministic LP scoring engine that evaluates DeFi liquidity pool
 positions on **Meteora DLMM**, **Raydium CLMM**, and **Orca Whirlpool**. It
-consists of four modules:
+consists of six modules:
 
 1. **`lp_scoring.py`** — Core scoring engine (v2: config-driven, data-quality aware)
-2. **`run_cycle.py`** — Cycle runner that loads data, invokes scoring, builds
+2. **`dynamic.py`** — Rolling calibration layer: percentiles, regime detection,
+   adaptive thresholds, expected-PnL position verdicts
+3. **`run_cycle.py`** — Cycle runner that loads data, invokes scoring, builds
    George-schema signals, and logs results
-3. **`profiles.json`** — Externalized scoring configuration (weights,
-   thresholds, constants). Missing file → built-in defaults; invalid file →
-   fatal error (fail-closed).
-4. **`test_lp_scoring.py`** — Stdlib unit tests (`python3 test_lp_scoring.py -v`)
-5. **`backtest.py`** — Historical replay of pool/position verdicts over the
+4. **`profiles.json`** — Externalized scoring configuration (weights,
+   thresholds, constants, dynamic knobs). Missing file → built-in defaults;
+   invalid file → fatal error (fail-closed).
+5. **`test_lp_scoring.py`** / **`test_dynamic.py`** — Stdlib unit tests
+6. **`backtest.py`** — Historical replay of pool/position verdicts over the
    Missy scan archive (see "Backtesting" below)
+7. **`tuner.py`** — Out-of-sample weight search over historical PnL
 
 ## Data Flow
 
@@ -22,17 +25,21 @@ consists of four modules:
    configured directories
 2. **Validation**: Freshness check (max-age, default 3900 s), malformed data
    handling, config validation at load time
-3. **Scoring**: Each pool gets a 0-100 score across 4-5 weighted components;
+3. **Dynamic calibration**: `dynamic.py` builds a context from prior scans
+   (rolling percentiles, regime, adaptive thresholds) and passes it into scoring
+4. **Scoring**: Each pool gets a 0-100 score across 4-5 weighted components;
    each position gets a 0-100 score plus a `data_quality` record listing
    components scored on missing/unusable inputs. `score_pool` embeds the
    original `_pool` dict; OPEN_CANDIDATE verdicts carry it for signal building
-4. **Verdicts**: Scores map to verdicts. **Open/close separation**: a position
+5. **Verdicts**: Scores map to verdicts. **Open/close separation**: a position
    verdict of CLOSE requires all components to be scored on known data — any
    unknown component caps the verdict at REVIEW. Policy CLOSE
-   (off-universe/unknown pair) is exempt and always CLOSE.
-5. **Signal building**: For supported DEXes, `CLOSE`/`COLLECT_FEES` produce
+   (off-universe/unknown pair) is exempt and always CLOSE. With enough data,
+   expected-PnL can override the score-based verdict.
+6. **Signal building**: For supported DEXes, `CLOSE`/`COLLECT_FEES` produce
    direct signals; `OPEN_CANDIDATE` goes through `_build_open_signal`
-6. **Output**: JSON report, human summary, signal files, daily markdown log
+7. **Output**: JSON report, human summary, signal files, daily markdown log,
+   and a `dynamic` block showing the active regime and thresholds
 
 ## Scoring Components
 
@@ -60,14 +67,26 @@ Each position result carries `data_quality.unknown_components` — the list of
 components whose inputs were missing or unusable (e.g. Orca fee sentinel
 `u64::MAX`, zero pool volatility).
 
+## Dynamic Layers
+
+| Layer | Module | Behaviour |
+|---|---|---|
+| 1. Rolling percentiles | `dynamic.py` | `fee_yield` and `turnover` are scored as a percentile of the same pair class over the trailing window, blended with the absolute score (`blend_alpha`) |
+| 2. Regime detection | `dynamic.py` | Classifies market as `neutral`/`low_vol`/`high_vol`/`fee_boom`/`cracked_peg` and shifts component weights multiplicatively |
+| 3. Adaptive thresholds | `dynamic.py` | `OPEN`/`WATCH` cut-offs are quantiles of the scored universe (floor/ceil clamps keep them sane) |
+| 4. Expected-PnL verdicts | `dynamic.py` | Compares HOLD vs CLOSE vs REBALANCE expected value over a short horizon; only overrides when inputs are complete and the margin is decisive |
+| 5. Weight tuner | `tuner.py` | Random search over weight perturbations, validated on the last 20% of scan history, writes `profiles.tuned.json` |
+
 ## Verdict Mapping
 
-- **Pool**: ≥ 70 → OPEN_CANDIDATE, ≥ 55 → WATCH, else IGNORE
+- **Pool** (static defaults): ≥ 70 → OPEN_CANDIDATE, ≥ 55 → WATCH, else IGNORE
+  - With adaptive thresholds, cut-offs come from the quantiles of the scored universe
 - **Position**: < 40 → CLOSE, < 60 → REVIEW, ≥ 60 → HOLD
   - CLOSE **only** when every component was scored on known data
   - Any unknown component caps the verdict at REVIEW (missing data is a data
     problem, not a position problem)
   - Off-universe/unknown pair → CLOSE regardless of data (policy rule)
+  - Expected-PnL override can choose HOLD/CLOSE/REBALANCE when all required inputs exist
 - REBALANCE: CLOSE/REVIEW position whose pool is still an OPEN_CANDIDATE
 - COLLECT_FEES: HOLD position with fees ≥ max($5, 1% of position value);
   unknown fees never trigger collection
@@ -94,6 +113,8 @@ components whose inputs were missing or unusable (e.g. Orca fee sentinel
   tracks forward value trajectory for the same position address.
 
 Run: `python3 backtest.py [--data-dir /data/missy-data] [--horizon N] [--json]`
+
+Add `--dynamic` to run with rolling history, regime shifts and adaptive thresholds.
 
 ## Signal Generation
 

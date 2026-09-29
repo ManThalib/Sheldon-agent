@@ -21,6 +21,12 @@ from pathlib import Path
 
 import lp_scoring
 from capital import DUST_MIN_USD
+from readiness import (
+    build_prep_swap_signal,
+    gate_prep_swaps,
+    load_raw_wallet,
+    plan_funding,
+)
 from strategy import (
     MIN_POSITION_USD,
     build_strategies,
@@ -42,7 +48,12 @@ def _utc_iso():
 
 
 def _load_active_positions(positions_dir: str) -> dict:
-    """Return dict of pool_address -> position dict for currently active positions."""
+    """Return dict of pool_address -> position dict for positions not closed.
+
+    Includes 'inactive' (zero-liquidity but still open on-chain) positions:
+    re-opening a pool that already holds one creates duplicate positions,
+    which is exactly the bug this dedup exists to prevent.
+    """
     pos_path = lp_scoring.newest_file(positions_dir, "position_scan")
     if not pos_path:
         return {}
@@ -51,7 +62,43 @@ def _load_active_positions(positions_dir: str) -> dict:
     except Exception:
         return {}
     positions = data.get("positions", []) if isinstance(data, dict) else data
-    return {p.get("pool_address"): p for p in positions if p.get("pool_address")}
+    return {p.get("pool_address"): p for p in positions
+            if p.get("pool_address") and p.get("status") != "closed"}
+
+
+def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tuple:
+    """Drop open candidates that must not become signals.
+
+    Returns (kept, skipped). Skips:
+      - pools already holding a non-closed position (dedup),
+      - duplicate pool addresses (first candidate wins),
+      - candidates whose current tick/bin is unknown (center == 0):
+        centering a range at 0 means the live price is unknown, which is
+        how the ZEC/USDC out-of-range re-open happened.
+    """
+    kept = []
+    skipped = []
+    seen = set()
+    for v in open_candidates:
+        addr = v.get("pool_address")
+        dex = v.get("dex") or "unknown"
+        base = {"pool_address": addr, "dex": dex, "score": v.get("score")}
+        if addr in active_positions:
+            skipped.append({**base,
+                            "reason": "already holding a position in this pool (dedup)"})
+            continue
+        if addr in seen:
+            skipped.append({**base,
+                            "reason": "duplicate pool in scan; first candidate kept"})
+            continue
+        pool = v.get("_pool") or {}
+        if _range_center(pool, dex) == 0:
+            skipped.append({**base,
+                            "reason": "current tick/bin unknown (center=0); refusing to open blind"})
+            continue
+        seen.add(addr)
+        kept.append(v)
+    return kept, skipped
 
 
 def _range_center(pool: dict, dex: str) -> int:
@@ -148,11 +195,60 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
     active = _load_active_positions(positions_dir)
     created = []
     review = []
+    # Dedup/center-guard drops from main() surface as review items so the
+    # report explains why a high-scoring pool produced no signal.
+    for item in report.get("open_skipped", []):
+        review.append({
+            "pool_address": item.get("pool_address"),
+            "dex": item.get("dex"),
+            "score": item.get("score"),
+            "evidence": None,
+            "reason": item.get("reason", "open candidate skipped"),
+        })
     base = int(time.time())
     idx = 1
 
     wallet = report.get("wallet") or {}
     strategies = {s["pool_address"]: s for s in report.get("strategies", [])}
+
+    # 0. Capital prep swaps for the highest-scored unfunded strategy.
+    # Gate before writing: no re-emit while the wallet rescan has not yet
+    # caught up, and a hard stop when the loop stops converging.
+    funding = report.get("funding")
+    if funding is None:
+        # Fail safe: without a funding plan, refuse to open blind.
+        funding = {
+            "funded": [],
+            "unfunded": [
+                {"pool_address": s.get("pool_address"),
+                 "reason": "funding plan missing; refusing to open blind"}
+                for s in report.get("strategies", [])
+            ],
+            "prep_swaps_allowed": [],
+            "prep_swaps_blocked": [],
+            "notes": [],
+        }
+    allowed_preps = funding.get("prep_swaps_allowed") or []
+
+    # 0a. Blocked prep swaps surface as review items, never as signals.
+    for b in funding.get("prep_swaps_blocked") or []:
+        review.append({
+            "pool_address": b.get("for_pool"),
+            "dex": "jupiter",
+            "score": None,
+            "evidence": None,
+            "reason": f"prep swap {b.get('direction')} blocked: {b.get('reason')}",
+        })
+
+    # 0b. Allowed prep swaps execute before any position signals.
+    for spec in allowed_preps:
+        signal = build_prep_swap_signal(spec, idx, base)
+        path = os.path.join(signals_dir, f"{signal['signal_id']}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(signal, fh, indent=2)
+            fh.write("\n")
+        created.append(path)
+        idx += 1
 
     # 1. Dust swap signals (executed before any new positions).
     for asset in wallet.get("dust_assets", []):
@@ -179,6 +275,22 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
                     "score": v.get("score"),
                     "evidence": v.get("evidence"),
                     "reason": "OPEN candidate skipped (capital or ranking gate)",
+                })
+                continue
+            # Never emit an open when the strategy is not funded; the prep
+            # swap above handles the shortfall and a later cycle opens.
+            entry = next(
+                (e for e in (funding.get("unfunded") or [])
+                 if e.get("pool_address") == pool_addr),
+                None,
+            )
+            if entry:
+                review.append({
+                    "pool_address": pool_addr,
+                    "dex": dex,
+                    "score": v.get("score"),
+                    "evidence": v.get("evidence"),
+                    "reason": f"OPEN deferred: {entry.get('reason') or 'tokens not funded'}",
                 })
                 continue
             signal = _build_open_signal(strategies[pool_addr], v, idx, base)
@@ -263,6 +375,7 @@ def append_log(report: dict, memory_dir: str, signals_created: list, review: lis
 
     wallet = report.get("wallet", {})
     capital = report.get("capital_plan", {})
+    funding = report.get("funding") or {}
 
     lines = [
         f"## Cycle — {_utc_iso()}",
@@ -271,6 +384,16 @@ def append_log(report: dict, memory_dir: str, signals_created: list, review: lis
         f"- capital: idle={wallet.get('idle_usdc', 0.0):.2f} dust={wallet.get('dust_total_usdc', 0.0):.2f} deployable={wallet.get('deployable_usdc', 0.0):.2f}",
         f"- plan: suggested_position={capital.get('suggested_position_usdc', 0.0):.2f} open_eligible={capital.get('open_eligible', False)}",
     ]
+    if funding:
+        lines.append(
+            f"- funding: funded={len(funding.get('funded') or [])} "
+            f"unfunded={len(funding.get('unfunded') or [])} "
+            f"prep_allowed={len(funding.get('prep_swaps_allowed') or [])} "
+            f"prep_blocked={len(funding.get('prep_swaps_blocked') or [])} "
+            f"sol_reserve={(funding.get('sol_reserve_lamports') or 0) / 1e9:.4f}"
+        )
+        for note in funding.get("notes") or []:
+            lines.append(f"  - funding note: {note}")
     if report.get("failures"):
         lines.append(f"- failures: {report['failures']}")
     if review:
@@ -318,7 +441,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Sheldon deterministic cycle runner")
     ap.add_argument("--pools-dir", default="/data/missy-data/pool_screens")
     ap.add_argument("--positions-dir", default="/data/missy-data/position_scans")
-    ap.add_argument("--wallet-scans-dir", default="/data/missy-data/wallet_scans")
+    ap.add_argument("--wallet-scans-dir", default="/data/missy-data/wallet_screens")
     ap.add_argument("--write-signals", action="store_true")
     ap.add_argument("--signals-dir", default=DEFAULT_SIGNALS_DIR)
     ap.add_argument("--memory-dir", default=DEFAULT_MEMORY_DIR)
@@ -343,7 +466,34 @@ def main() -> int:
 
     open_candidates = [v for v in report.get("verdicts", [])
                        if v.get("action") == "OPEN_CANDIDATE"]
-    report["strategies"] = build_strategies(open_candidates, wallet)
+    active_positions = _load_active_positions(args.positions_dir)
+    kept_candidates, open_skipped = _filter_open_candidates(
+        open_candidates, active_positions
+    )
+    report["open_skipped"] = open_skipped
+    report["strategies"] = build_strategies(kept_candidates, wallet)
+
+    # Capital readiness: annotate strategies with their pool enrichment,
+    # diff target token needs against the newest raw wallet scan, and gate
+    # prep swaps (rescan-wait + hourly loop guard) before any signal write.
+    pool_meta = {v.get("pool_address"): (v.get("_pool") or {}) for v in kept_candidates}
+    for s in report["strategies"]:
+        s.setdefault("_pool", pool_meta.get(s.get("pool_address")) or {})
+    raw_wallet = load_raw_wallet(args.wallet_scans_dir)
+    dust_mints = {a.get("mint") for a in (wallet.get("dust_assets") or []) if a.get("mint")}
+    funding = plan_funding(
+        report["strategies"], raw_wallet["assets"],
+        wallet_path=raw_wallet["path"], wallet_mtime=raw_wallet["mtime"],
+        dust_mints=dust_mints,
+    )
+    if raw_wallet.get("error"):
+        funding["notes"].append(f"wallet scan unavailable: {raw_wallet['error']}")
+    allowed_preps, blocked_preps = gate_prep_swaps(
+        funding["prep_swaps"], args.signals_dir, funding["wallet_mtime"]
+    )
+    funding["prep_swaps_allowed"] = allowed_preps
+    funding["prep_swaps_blocked"] = blocked_preps
+    report["funding"] = funding
 
     if report.get("failures"):
         err = "; ".join(report["failures"])

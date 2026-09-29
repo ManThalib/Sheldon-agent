@@ -18,7 +18,11 @@ MAX_POSITION_OPEN_PER_CYCLE = 3
 # --------------------------------------------------------------------------
 WIDTH_FACTOR = 0.5        # cover +/- volatility * WIDTH_FACTOR on each side
 MIN_HALF_WIDTH = 10       # minimum bins/ticks on each side
-MAX_HALF_WIDTH = 1000     # maximum bins/ticks on each side
+MAX_HALF_WIDTH = 1000     # maximum bins/ticks on each side (default cap)
+# George's Meteora DLMM executor rail: a single Meteora init tx can only
+# create ~70 bins, so Meteora ranges must be capped at 70 bins inclusive.
+# inclusive width = upper - lower + 1  =>  max half-width = (70 - 1) // 2
+MAX_METEORA_RANGE_WIDTH = 70
 
 
 def suggested_position_usd(deployable_usdc: float) -> float:
@@ -34,6 +38,18 @@ def open_eligible(wallet: Dict[str, Any]) -> bool:
     idle = float(wallet.get("idle_usdc") or 0.0)
     suggested = suggested_position_usd(deployable)
     return idle >= MIN_POSITION_USD and suggested >= MIN_POSITION_USD
+
+
+def _max_half_width_for_dex(dex: str) -> int:
+    """Return the per-DEX maximum half-width in bins/ticks.
+
+    Mirrors George's executor rails:
+      - Meteora: max 70 bins inclusive per Meteora DLMM init-tx limits.
+      - Raydium / Orca: use the generic cap.
+    """
+    if dex == "meteora":
+        return (MAX_METEORA_RANGE_WIDTH - 1) // 2
+    return MAX_HALF_WIDTH
 
 
 def adaptive_half_width(pool: Dict[str, Any]) -> int:
@@ -67,7 +83,8 @@ def adaptive_half_width(pool: Dict[str, Any]) -> int:
         step_ratio = math.pow(1.0001, tick_spacing)
 
     half_width = math.ceil(math.log1p(target_half_fraction) / math.log(step_ratio))
-    half_width = max(MIN_HALF_WIDTH, min(half_width, MAX_HALF_WIDTH))
+    max_half_width = _max_half_width_for_dex(dex)
+    half_width = max(MIN_HALF_WIDTH, min(half_width, max_half_width))
     return int(half_width)
 
 
