@@ -37,6 +37,15 @@ import math
 import os
 import statistics
 
+
+def _min_open_score() -> float:
+    """Policy score floor, loaded lazily to avoid import cycles."""
+    from strategy import get_policy
+    try:
+        return float(get_policy().get("min_open_score", 70.0))
+    except Exception:
+        return 70.0
+
 # Components that have a defined raw metric for percentile normalisation.
 RAW_METRICS = {
     "fee_yield": lambda p: float(p.get("realized_fee_apr") or 0.0),
@@ -258,9 +267,13 @@ def adaptive_pool_thresholds(scores, cfg):
     if len(values) < int(thr_cfg.get("min_pools", 20)):
         return None
 
+    # Floor both cut-offs at the policy min_open_score: a quantile of a
+    # weak universe must never let pools below the static rail through.
+    floor_open = max(float(thr_cfg.get("floor_open", 55.0)),
+                     _min_open_score())
     open_ = _quantile(values, float(thr_cfg.get("open_quantile", 0.90)))
     watch = _quantile(values, float(thr_cfg.get("watch_quantile", 0.70)))
-    open_ = min(max(open_, float(thr_cfg.get("floor_open", 55.0))),
+    open_ = min(max(open_, floor_open),
                 float(thr_cfg.get("ceil_open", 90.0)))
     watch = min(max(watch, float(thr_cfg.get("floor_watch", 40.0))),
                 float(thr_cfg.get("ceil_watch", 80.0)))

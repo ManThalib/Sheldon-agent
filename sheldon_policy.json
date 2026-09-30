@@ -12,6 +12,7 @@
   },
 
   "pool_eligibility": {
+    "min_open_score": 70.0,
     "min_pool_liquidity_usd": 250000,
     "min_24h_volume_usd": 1000000,
     "allowed_bin_steps": [10, 20, 25, 50, 100],

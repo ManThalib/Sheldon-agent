@@ -39,6 +39,7 @@ def _load_sheldon_policy() -> Dict[str, Any]:
 
     pool = data.get("pool_eligibility") or {}
     policy["allowed_bin_steps"] = set(pool.get("allowed_bin_steps", [10, 20, 25, 50, 100]))
+    policy["min_open_score"] = float(pool.get("min_open_score", 70.0))
     policy["min_pool_liquidity_usd"] = float(pool.get("min_pool_liquidity_usd", 250000.0))
     policy["min_24h_volume_usd"] = float(pool.get("min_24h_volume_usd", 1000000.0))
     policy["min_fee_tvl_ratio"] = float(pool.get("min_fee_tvl_ratio", 0.05))

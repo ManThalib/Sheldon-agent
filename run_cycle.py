@@ -129,6 +129,7 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
     }
     min_liquidity = _POLICY.get("min_pool_liquidity_usd", 250000.0)
     min_volume = _POLICY.get("min_24h_volume_usd", 1000000.0)
+    min_score = _POLICY.get("min_open_score", 70.0)
 
     if not _in_trading_window(policy_windows, "open"):
         skipped.append({
@@ -172,6 +173,11 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
         if not bin_ok:
             skipped.append({**base, "reason": bin_reason})
             continue
+        score = v.get("score")
+        if score is None or float(score) < min_score:
+            skipped.append({**base,
+                            "reason": f"score {score} < policy min_open_score {min_score}"})
+            continue
         seen.add(addr)
         kept.append(v)
     return kept, skipped
@@ -203,6 +209,12 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
     # builder must never emit an open for a bin_step rail violation.
     bin_ok, _reason = meteora_bin_step_allowed(pool, dex)
     if not bin_ok:
+        return None
+    # Score must be present and at/above the policy floor; George enforces
+    # the same rail fail-closed, so a signal without it would be rejected.
+    score = v.get("score")
+    min_score = _POLICY.get("min_open_score", 70.0)
+    if score is None or float(score) < min_score:
         return None
 
     # Pull prices and decimals.
@@ -238,9 +250,10 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
             "amount_y": str(amount_y),
         },
         "position_usd": position_usd,
+        "score": float(score),
         "max_slippage_bps": 100,
         "reason": (
-            f"OPEN score={v.get('score')} dex={dex} "
+            f"OPEN score={v.get('score')} threshold={min_score} dex={dex} "
             f"position_usd={position_usd:.2f} center={strategy['center']}"
         ),
         "created_at": _utc_iso(),
