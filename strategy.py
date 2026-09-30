@@ -1,17 +1,85 @@
 """Position sizing and range selection for Sheldon open signals.
 
 All inputs come from Missy scans; no RPC calls are made here.
+Policy values are loaded from sheldon_policy.json. Mechanical limits are
+loaded from George's execution_limits.json so strategy and executor rails
+stay in sync.
 """
 
+import json
 import math
-from typing import Any, Dict, List
+import os
+from typing import Any, Dict, List, Set
+
 
 # --------------------------------------------------------------------------
-# Sizing and selection rails
+# Load policy and mechanical limits from JSON single-sources.
 # --------------------------------------------------------------------------
-MIN_POSITION_USD = 15.0
-DEFAULT_MAX_POSITION_USD = 100.0
-MAX_POSITION_OPEN_PER_CYCLE = 3
+_SHELDON_DIR = os.path.dirname(os.path.abspath(__file__))
+_GEORGE_DIR = "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm"
+_SHELDON_POLICY_PATH = os.path.join(_SHELDON_DIR, "sheldon_policy.json")
+_GEORGE_LIMITS_PATH = os.path.join(_GEORGE_DIR, "execution_limits.json")
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _load_sheldon_policy() -> Dict[str, Any]:
+    data = _load_json(_SHELDON_POLICY_PATH)
+    policy: Dict[str, Any] = {}
+    sizing = data.get("position_sizing") or {}
+    policy["min_position_usd"] = float(sizing.get("min_position_usd", 15.0))
+    policy["default_max_position_usd"] = float(sizing.get("default_max_position_usd", 100.0))
+    policy["max_opens_per_cycle"] = int(sizing.get("max_opens_per_cycle", 3))
+
+    pool = data.get("pool_eligibility") or {}
+    policy["allowed_bin_steps"] = set(pool.get("allowed_bin_steps", [10, 20, 25, 50, 100]))
+    policy["min_pool_liquidity_usd"] = float(pool.get("min_pool_liquidity_usd", 250000.0))
+    policy["min_24h_volume_usd"] = float(pool.get("min_24h_volume_usd", 1000000.0))
+    policy["min_fee_tvl_ratio"] = float(pool.get("min_fee_tvl_ratio", 0.05))
+    policy["max_volatility_pct"] = float(pool.get("max_volatility_pct", 50.0))
+    policy["max_turnover_ratio"] = float(pool.get("max_turnover_ratio", 50.0))
+
+    windows = data.get("windows") or {}
+    policy["open_window_utc"] = windows.get("open_window_utc", "00:00-23:59")
+    policy["close_window_utc"] = windows.get("close_window_utc", "00:00-23:59")
+    policy["blackout_dates"] = list(windows.get("blackout_dates", []))
+
+    intent = data.get("execution_intent") or {}
+    policy["default_max_slippage_bps"] = int(intent.get("default_max_slippage_bps", 100))
+
+    return policy
+
+
+def _load_execution_limits() -> Dict[str, Any]:
+    data = _load_json(_GEORGE_LIMITS_PATH)
+    limits: Dict[str, Any] = {}
+    for group in ("position_sizing", "exposure_and_loss", "circuit_breakers",
+                  "execution_guards", "range_limits"):
+        limits.update(data.get(group) or {})
+    return limits
+
+
+_POLICY = _load_sheldon_policy()
+_LIMITS = _load_execution_limits()
+
+# --------------------------------------------------------------------------
+# Sizing and selection rails (single-sourced from policy JSON)
+# --------------------------------------------------------------------------
+MIN_POSITION_USD: float = _POLICY["min_position_usd"]
+DEFAULT_MAX_POSITION_USD: float = _POLICY["default_max_position_usd"]
+MAX_POSITION_OPEN_PER_CYCLE: int = _POLICY["max_opens_per_cycle"]
+
+# Mirror of George's SAFETY_RAILS.md `allowed_bin_steps` (minimum 10). A
+# Meteora pool whose bin_step is not in this list must never emit an OPEN
+# signal: George hard-rejects it at the executor, so the open would just
+# burn a cycle (and near-1-bp pools earn nothing worth the round trip).
+ALLOWED_METEORA_BIN_STEPS: Set[int] = _POLICY["allowed_bin_steps"]
 
 # --------------------------------------------------------------------------
 # Volatility-adaptive range constants (centered range)
@@ -22,7 +90,12 @@ MAX_HALF_WIDTH = 1000     # maximum bins/ticks on each side (default cap)
 # George's Meteora DLMM executor rail: a single Meteora init tx can only
 # create ~70 bins, so Meteora ranges must be capped at 70 bins inclusive.
 # inclusive width = upper - lower + 1  =>  max half-width = (70 - 1) // 2
-MAX_METEORA_RANGE_WIDTH = 70
+MAX_METEORA_RANGE_WIDTH: int = int(_LIMITS.get("max_meteora_range_width", 70))
+
+
+def get_policy() -> Dict[str, Any]:
+    """Return a copy of the loaded Sheldon policy."""
+    return _POLICY.copy()
 
 
 def suggested_position_usd(deployable_usdc: float) -> float:
@@ -50,6 +123,31 @@ def _max_half_width_for_dex(dex: str) -> int:
     if dex == "meteora":
         return (MAX_METEORA_RANGE_WIDTH - 1) // 2
     return MAX_HALF_WIDTH
+
+
+def meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None) -> tuple:
+    """Return (allowed, reason) for a Meteora pool's bin_step rail.
+
+    Fail-closed: an unknown bin_step counts as disallowed. Non-Meteora
+    pools are always allowed (bins are a DLMM concept). Callers that know
+    the dex should pass it — Missy _pool records may lack a dex field.
+    """
+    dex = (dex or pool.get("dex") or "").lower()
+    if dex != "meteora":
+        return True, ""
+    bin_step = pool.get("bin_step")
+    if bin_step in (None, "", 0):
+        return False, "bin_step unknown (fail-closed)"
+    try:
+        bin_step = int(bin_step)
+    except (TypeError, ValueError):
+        return False, "bin_step malformed"
+    if bin_step not in ALLOWED_METEORA_BIN_STEPS:
+        return False, (
+            f"bin_step {bin_step} < minimum {min(ALLOWED_METEORA_BIN_STEPS)} "
+            "(George rail: allowed_bin_steps)"
+        )
+    return True, ""
 
 
 def adaptive_half_width(pool: Dict[str, Any]) -> int:

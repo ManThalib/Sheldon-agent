@@ -40,12 +40,18 @@ class OpenCandidateFilterTests(unittest.TestCase):
 
     @staticmethod
     def _candidate(addr, score=90.0, dex="orca", pool=None):
+        base_pool = {"current_tick_index": 26191}
+        if pool is not None:
+            base_pool.update(pool)
+        # Policy-eligible defaults so tests exercise the rail under test.
+        base_pool.setdefault("tvl", 500000.0)
+        base_pool.setdefault("volume_window", 2000000.0)
         return {
             "action": "OPEN_CANDIDATE",
             "pool_address": addr,
             "dex": dex,
             "score": score,
-            "_pool": pool if pool is not None else {"current_tick_index": 26191},
+            "_pool": base_pool,
         }
 
     def test_held_pool_is_skipped(self):
@@ -106,7 +112,8 @@ class OpenCandidateFilterTests(unittest.TestCase):
 
     def test_meteora_center_from_active_bin(self):
         kept, _ = _filter_open_candidates(
-            [self._candidate("P1", dex="meteora", pool={"active_bin_id": -5333})],
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": 10})],
             {},
         )
         self.assertEqual(len(kept), 1)
@@ -117,6 +124,74 @@ class OpenCandidateFilterTests(unittest.TestCase):
             {},
         )
         self.assertEqual(kept, [])
+
+    def test_meteora_bin_step_4_is_dropped(self):
+        # Incident pool 5rCf1DM8...: bin_step 4 violates George's
+        # allowed_bin_steps rail (minimum 10).
+        kept, skipped = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": 4})],
+            {},
+        )
+        self.assertEqual(kept, [])
+        self.assertIn("bin_step 4", skipped[0]["reason"])
+
+    def test_meteora_bin_step_10_is_kept(self):
+        kept, _ = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": 10})],
+            {},
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_meteora_bin_step_100_is_kept(self):
+        kept, _ = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": 100})],
+            {},
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_meteora_missing_bin_step_fails_closed(self):
+        kept, skipped = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333})],
+            {},
+        )
+        self.assertEqual(kept, [])
+        self.assertIn("bin_step", skipped[0]["reason"])
+
+    def test_meteora_malformed_bin_step_fails_closed(self):
+        kept, _ = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": "junk"})],
+            {},
+        )
+        self.assertEqual(kept, [])
+
+    def test_non_meteora_pool_ignores_bin_step_rail(self):
+        # Orca/Raydium have tick_spacing, not bin steps: rail must not fire.
+        kept, _ = _filter_open_candidates(
+            [self._candidate("P1", dex="orca",
+                             pool={"current_tick_index": 26191, "tick_spacing": 64})],
+            {},
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_build_open_signal_refuses_disallowed_bin_step(self):
+        # Last-resort guard: even if a filtered candidate slipped through,
+        # the builder must never emit an open for a rail-violating pool.
+        strategy = {"suggested_usdc": 50.0, "center": -100, "half_width": 10,
+                    "bin_range": {"lower": -110, "upper": -90}}
+        verdict = self._candidate("P1", dex="meteora",
+                                  pool={"pool_address": "P1",
+                                        "active_bin_id": -100,
+                                        "bin_step": 4,
+                                        "token_x_decimals": 9,
+                                        "token_y_decimals": 6,
+                                        "token_x_price_usd": 120.0,
+                                        "token_y_price_usd": 1.0})
+        self.assertIsNone(_build_open_signal(strategy, verdict, 1, 12345))
 
 
 class WalletCapitalTests(unittest.TestCase):
@@ -314,6 +389,7 @@ class SignalTests(unittest.TestCase):
             "evidence": {},
             "_pool": {
                 "pool_address": "p1",
+                "bin_step": 10,
                 "token_x_decimals": 9,
                 "token_y_decimals": 6,
                 "token_x_price_usd": 120.0,
@@ -465,7 +541,9 @@ class RunCycleIntegrationTests(unittest.TestCase):
             "realized_fee_apr": 150.0, "volatility": 8.0,
             "token_x_price_usd": 117.0, "token_y_price_usd": 1.0,
             "token_x_decimals": 9, "token_y_decimals": 6,
-            "bin_step": 4, "tick_spacing": 4,
+            # bin_step 10: an allowed step. The 4-step incident pool shape
+            # is covered by test_meteora_bin_step_4_is_dropped above.
+            "bin_step": 10, "tick_spacing": 4,
             "active_bin_id": -5299,
         }
 

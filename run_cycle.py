@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import lp_scoring
+import range_state
 from capital import DUST_MIN_USD
 from readiness import (
     build_prep_swap_signal,
@@ -31,7 +32,14 @@ from strategy import (
     MIN_POSITION_USD,
     build_strategies,
     capital_plan,
+    get_policy,
+    meteora_bin_step_allowed,
 )
+
+# --------------------------------------------------------------------------
+# Policy values loaded from sheldon_policy.json (single source).
+# --------------------------------------------------------------------------
+_POLICY = get_policy()
 
 # Protocols George can execute. Signals for anything else stay in review.
 SUPPORTED_DEXES = {"meteora", "raydium", "orca"}
@@ -66,6 +74,36 @@ def _load_active_positions(positions_dir: str) -> dict:
             if p.get("pool_address") and p.get("status") != "closed"}
 
 
+def _in_trading_window(windows: dict, action: str) -> bool:
+    """Return True if the current Asia/Shanghai time is inside the configured
+    trading window and not on a blackout date.
+    """
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+
+    blackout = windows.get("blackout_dates") or []
+    today = now.strftime("%Y-%m-%d")
+    if today in blackout:
+        return False
+
+    window_key = "open_window_utc" if action == "open" else "close_window_utc"
+    window = windows.get(window_key, "00:00-23:59")
+    try:
+        start_str, end_str = window.split("-")
+        start_hour, start_min = map(int, start_str.strip().split(":"))
+        end_hour, end_min = map(int, end_str.strip().split(":"))
+    except (ValueError, AttributeError):
+        return True
+
+    current_min = now.hour * 60 + now.minute
+    start_min_total = start_hour * 60 + start_min
+    end_min_total = end_hour * 60 + end_min
+    if end_min_total < start_min_total:
+        return current_min >= start_min_total or current_min <= end_min_total
+    return start_min_total <= current_min <= end_min_total
+
+
 def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tuple:
     """Drop open candidates that must not become signals.
 
@@ -75,10 +113,32 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
       - candidates whose current tick/bin is unknown (center == 0):
         centering a range at 0 means the live price is unknown, which is
         how the ZEC/USDC out-of-range re-open happened.
+      - pools outside the configured open window or on a blackout date,
+      - pools that fail the Sheldon policy eligibility gates (TVL, volume),
+      - Meteora pools whose bin_step is not in George's allowed_bin_steps
+        rail (minimum 10): the executor would hard-reject the open, so
+        the candidate is skipped here and explained as a review item.
     """
     kept = []
     skipped = []
     seen = set()
+    policy_windows = {
+        "open_window_utc": _POLICY.get("open_window_utc"),
+        "close_window_utc": _POLICY.get("close_window_utc"),
+        "blackout_dates": _POLICY.get("blackout_dates"),
+    }
+    min_liquidity = _POLICY.get("min_pool_liquidity_usd", 250000.0)
+    min_volume = _POLICY.get("min_24h_volume_usd", 1000000.0)
+
+    if not _in_trading_window(policy_windows, "open"):
+        skipped.append({
+            "pool_address": None,
+            "dex": "any",
+            "score": None,
+            "reason": "outside configured open window or blackout date",
+        })
+        return kept, skipped
+
     for v in open_candidates:
         addr = v.get("pool_address")
         dex = v.get("dex") or "unknown"
@@ -95,6 +155,22 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
         if _range_center(pool, dex) == 0:
             skipped.append({**base,
                             "reason": "current tick/bin unknown (center=0); refusing to open blind"})
+            continue
+
+        tvl = float(pool.get("tvl") or 0.0)
+        if tvl < min_liquidity:
+            skipped.append({**base,
+                            "reason": f"pool TVL ${tvl:.0f} < policy ${min_liquidity:.0f}"})
+            continue
+        volume = float(pool.get("volume_window") or pool.get("volume") or 0.0)
+        if volume < min_volume:
+            skipped.append({**base,
+                            "reason": f"pool volume ${volume:.0f} < policy ${min_volume:.0f}"})
+            continue
+
+        bin_ok, bin_reason = meteora_bin_step_allowed(pool, dex)
+        if not bin_ok:
+            skipped.append({**base, "reason": bin_reason})
             continue
         seen.add(addr)
         kept.append(v)
@@ -122,6 +198,11 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
     dex = v.get("dex") or "unknown"
     pool = v.get("_pool") or {}
     if dex not in SUPPORTED_DEXES or not pool:
+        return None
+    # Last-resort guard: even if a filtered candidate slipped through, the
+    # builder must never emit an open for a bin_step rail violation.
+    bin_ok, _reason = meteora_bin_step_allowed(pool, dex)
+    if not bin_ok:
         return None
 
     # Pull prices and decimals.
@@ -156,6 +237,7 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
             "amount_x": str(amount_x),
             "amount_y": str(amount_y),
         },
+        "position_usd": position_usd,
         "max_slippage_bps": 100,
         "reason": (
             f"OPEN score={v.get('score')} dex={dex} "
@@ -394,6 +476,13 @@ def append_log(report: dict, memory_dir: str, signals_created: list, review: lis
         )
         for note in funding.get("notes") or []:
             lines.append(f"  - funding note: {note}")
+    grace = report.get("out_of_range_grace") or {}
+    if grace.get("deferred_positions"):
+        lines.append(
+            f"- out-of-range grace: {len(grace['deferred_positions'])} position(s) "
+            f"held below {grace['allowed_runs']} consecutive out-of-range runs "
+            f"({', '.join(grace['deferred_positions'])})"
+        )
     if report.get("failures"):
         lines.append(f"- failures: {report['failures']}")
     if review:
@@ -445,6 +534,8 @@ def main() -> int:
     ap.add_argument("--write-signals", action="store_true")
     ap.add_argument("--signals-dir", default=DEFAULT_SIGNALS_DIR)
     ap.add_argument("--memory-dir", default=DEFAULT_MEMORY_DIR)
+    ap.add_argument("--state-dir", default=os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "state"))
     ap.add_argument("--json", action="store_true", help="print full JSON report to stdout")
     ap.add_argument("--max-age-seconds", type=float, default=3900.0)
     args = ap.parse_args()
@@ -464,9 +555,32 @@ def main() -> int:
     wallet = report.get("wallet") or lp_scoring._empty_wallet("wallet not loaded")
     report["capital_plan"] = capital_plan(wallet)
 
+    active_positions = _load_active_positions(args.positions_dir)
+
+    # Out-of-range grace (Mr. Man rail): a position that leaves its range
+    # must survive ALLOWED_OUT_OF_RANGE_RUNS consecutive runs before a
+    # CLOSE/REBALANCE verdict passes. Run 1 downgrades the verdict to HOLD
+    # with a review reason (no close signal); run 2 lets it through.
+    # Back in range resets the counter.
+    grace_counts = range_state.update_out_of_range_counts(
+        list(active_positions.values()),
+        range_state.load_range_state(args.state_dir),
+    )
+    range_state.save_range_state(grace_counts, args.state_dir)
+    report["verdicts"] = [
+        range_state.out_of_range_position_verdict(v, grace_counts)
+        for v in report.get("verdicts", [])
+    ]
+    report["out_of_range_grace"] = {
+        "allowed_runs": range_state.ALLOWED_OUT_OF_RANGE_RUNS,
+        "deferred_positions": sorted(
+            addr for addr, n in grace_counts.items()
+            if n < range_state.ALLOWED_OUT_OF_RANGE_RUNS
+        ),
+    }
+
     open_candidates = [v for v in report.get("verdicts", [])
                        if v.get("action") == "OPEN_CANDIDATE"]
-    active_positions = _load_active_positions(args.positions_dir)
     kept_candidates, open_skipped = _filter_open_candidates(
         open_candidates, active_positions
     )

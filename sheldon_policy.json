@@ -1,0 +1,39 @@
+{
+  "_comment": "Sheldon policy manifest. Strategy decisions live here. George enforces the matching execution rails from execution_limits.json.",
+
+  "universe": {
+    "stablecoins": [
+      "USDC", "USDT", "USDS", "PYUSD", "DAI", "FDUSD", "EURC", "USDH", "USX"
+    ],
+    "high_caps": [
+      "SOL", "WSOL", "WBTC", "CBBTC", "WETH", "ETH",
+      "JITOSOL", "JSOL", "MSOL", "BSOL", "JUP", "ZEC"
+    ]
+  },
+
+  "pool_eligibility": {
+    "min_pool_liquidity_usd": 250000,
+    "min_24h_volume_usd": 1000000,
+    "allowed_bin_steps": [10, 20, 25, 50, 100],
+    "min_fee_tvl_ratio": 0.05,
+    "max_volatility_pct": 50,
+    "max_turnover_ratio": 50
+  },
+
+  "position_sizing": {
+    "min_position_usd": 15,
+    "default_max_position_usd": 100,
+    "max_opens_per_cycle": 3
+  },
+
+  "windows": {
+    "open_window_utc": "00:00-23:59",
+    "close_window_utc": "00:00-23:59",
+    "blackout_dates": [],
+    "timezone": "Asia/Shanghai"
+  },
+
+  "execution_intent": {
+    "default_max_slippage_bps": 100
+  }
+}
