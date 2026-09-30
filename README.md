@@ -12,6 +12,21 @@ python3 lp_scoring.py [--pools-dir D] [--positions-dir D] [--json]
 python3 run_cycle.py [--write-signals] [--signals-dir D] [--json] [--max-age-seconds N]
 ```
 
+```bash
+python3 backtest.py [--data-dir /data/missy-data] [--horizon N] [--json]
+```
+
+## Modules
+
+- `lp_scoring.py` — core deterministic scoring engine
+- `run_cycle.py` — cycle runner and signal builder
+- `dynamic.py` — rolling calibration, regime detection, and adaptive thresholds
+- `range_state.py` — range-status tracking and out-of-range handling
+- `readiness.py` — capital readiness and pre-trade checks
+- `tuner.py` — out-of-sample weight search over historical PnL
+- `backtest.py` — historical replay of pool/position verdicts
+- `profiles.json` / `profiles.tuned.json` — scoring profiles and tuned outputs
+
 ## Output
 
 - **Human-readable summary**: top pool scores and open positions status
