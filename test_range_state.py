@@ -53,8 +53,22 @@ class OutOfRangeDetectionTests(unittest.TestCase):
         self.assertFalse(range_state.position_out_of_range(pos))
 
     def test_in_range_flag_fallback(self):
-        self.assertTrue(range_state.position_out_of_range({"in_range": False}))
-        self.assertFalse(range_state.position_out_of_range({"in_range": True}))
+        # A verifiable out-of-range flag carries decoded bounds; a bare
+        # false flag (no bounds fields) is a fallback record shape and
+        # treated like unknown data below.
+        self.assertTrue(range_state.position_out_of_range(
+            {"in_range": False, "lower_bound": -100, "upper_bound": 100}))
+        self.assertFalse(range_state.position_out_of_range(
+            {"in_range": True, "lower_bound": -100, "upper_bound": 100}))
+
+    def test_null_bounds_flag_false_never_counts_as_out_of_range(self):
+        """RPC-fallback record: null tick bounds + in_range=false is not
+        verifiable out-of-range evidence; grace counter must not start
+        (2026-10-03 false REBALANCE)."""
+        self.assertFalse(range_state.position_out_of_range(
+            {"in_range": False, "lower_bound": None, "upper_bound": None}))
+        self.assertFalse(range_state.position_out_of_range(
+            {"in_range": False, "lower_bound": None, "upper_bound": 100}))
 
     def test_unknown_data_never_counts_as_out_of_range(self):
         self.assertFalse(range_state.position_out_of_range({}))

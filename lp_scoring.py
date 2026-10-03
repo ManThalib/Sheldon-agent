@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Sheldon's LP scoring engine (v2).
 
 Deterministic scoring for LP positions on Meteora DLMM, Raydium CLMM, and
@@ -628,7 +627,12 @@ def estimate_expected_fees(pos: dict, pool: dict, fees_usd_known: bool) -> tuple
 def score_position_range_status(pos: dict, max_pts: float) -> tuple:
     """In-range earns fees; distance-to-boundary discounts positions about
     to flip single-sided. Missing data scores partial credit and flags
-    unknown (fail-closed on data quality, not on the position)."""
+    unknown (fail-closed on data quality, not on the position).
+
+    An RPC-failed scan (null tick bounds from a fallback/historical record)
+    is unknown data, not out-of-range evidence: null bounds must never
+    score 0 and must never read as verifiably out-of-range.
+    """
     unknown_credit = float(get_config()["constants"]["unknown_credit"])
     lower, upper, current = _pos_price_bounds(pos)
     if lower is not None and upper > lower:
@@ -639,6 +643,12 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
         edge_frac = clamp((edge_dist - 0.0) / 0.5, 0.0, 1.0)
         return round(max_pts * (0.6 + 0.4 * edge_frac), 2), True
     if "in_range" in pos and pos["in_range"] is not None:
+        # A fallback record with null tick bounds reports in_range=false
+        # only because the scanner could not decode the range. Treat that
+        # as unknown data (partial credit), not as out-of-range evidence.
+        bounds_missing = pos.get("lower_bound") is None or pos.get("upper_bound") is None
+        if bounds_missing and not pos["in_range"]:
+            return round(max_pts * unknown_credit, 2), False
         return (max_pts, True) if pos["in_range"] else (0.0, True)
     return round(max_pts * unknown_credit, 2), False
 
@@ -1010,3 +1020,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

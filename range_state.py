@@ -89,6 +89,12 @@ def position_out_of_range(pos: dict) -> bool:
         if upper > lower:
             return not (lower <= current <= upper)
         return False  # degenerate bounds: treat as unknown => in-range
+    if pos.get("in_range") is False and (
+        pos.get("lower_bound") is None or pos.get("upper_bound") is None
+    ):
+        # Fallback/historical record with undecodable tick bounds: not
+        # verifiably out of range, so never start the grace counter on it.
+        return False
     return pos.get("in_range") is False
 
 

@@ -196,8 +196,28 @@ class PositionComponentTests(unittest.TestCase):
     def test_in_range_flag_only(self):
         pts, known = score_position_range_status({"in_range": True}, 30.0)
         self.assertEqual((pts, known), (30.0, True))
-        pts, known = score_position_range_status({"in_range": False}, 30.0)
+        # Real out-of-range evidence needs decoded bounds; a bare false
+        # flag without any bounds fields is a fallback record (the
+        # scanner always emits bounds together with the flag when it
+        # decoded the position live).
+        pts, known = score_position_range_status(
+            {"in_range": False, "lower_bound": -100, "upper_bound": 100}, 30.0
+        )
         self.assertEqual((pts, known), (0.0, True))
+
+    def test_null_bounds_flag_false_is_unknown(self):
+        """RPC-fallback record (null tick bounds, in_range=false) is unknown
+        data, never out-of-range evidence (2026-10-03 false REBALANCE)."""
+        pts, known = score_position_range_status(
+            {"in_range": False, "lower_bound": None, "upper_bound": None}, 30.0
+        )
+        self.assertFalse(known)
+        self.assertEqual(pts, 15.0)  # unknown_credit 0.5
+        pts, known = score_position_range_status(
+            {"in_range": False, "lower_bound": None, "upper_bound": 100}, 30.0
+        )
+        self.assertFalse(known)
+        self.assertEqual(pts, 15.0)
 
     def test_staleness_grace(self):
         pts, known = score_position_staleness({"days_open": 10}, 20.0)
