@@ -272,12 +272,22 @@ def get_config() -> dict:
 # Universe policy — stablecoins and high-caps only, no memes.
 # --------------------------------------------------------------------------
 STABLECOINS = {
-    "USDC", "USDT", "PYUSD", "USDG"
+    "USDC", "USDT", "USDG"
 }
 
 HIGH_CAPS = {
-    "SOL", "WSOL", "WBTC", "CBBTC", "WETH", "ETH",
-    "JSOL", "MSOL", "BSOL", "ZEC",
+    "SOL", "WSOL", 
+    "CBT", "WBTC", "CBBTC", 
+    "ETH", "WETH",
+    "XRP", "cbRXP",
+    "ZEC",
+    "TAO",
+    "XMR",
+    "BMT",
+    "QNT",
+    "VIRTUAL",
+    "ZBCN",
+    "GRASS"
 }
 
 

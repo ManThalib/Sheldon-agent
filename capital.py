@@ -15,8 +15,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 # Tokens that should never be treated as dust (owner-editable list).
 # Default includes native SOL (gas) and any owner-designated long-term holds.
 RESERVED_MINTS: set = {
-    SOL_MINT,
-    "3ArcxqLtXMmBnWbbtfwQgVL3MNnDsggzgGDtXMnjpump",
+    SOL_MINT
 }
 
 # Dust rule: non-SOL, non-USDC, value above this threshold.

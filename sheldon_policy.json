@@ -3,18 +3,28 @@
 
   "universe": {
     "stablecoins": [
-      "USDC", "USDT", "USDS", "PYUSD", "DAI", "FDUSD", "EURC", "USDH", "USX"
+    "USDC", "USDT", "USDG"
     ],
     "high_caps": [
-      "SOL", "WSOL", "WBTC", "CBBTC", "WETH", "ETH",
-      "JITOSOL", "JSOL", "MSOL", "BSOL", "JUP", "ZEC"
+    "SOL", "WSOL", 
+    "CBT", "WBTC", "CBBTC", 
+    "ETH", "WETH",
+    "XRP", "cbRXP",
+    "ZEC",
+    "TAO",
+    "XMR",
+    "BMT",
+    "QNT",
+    "VIRTUAL",
+    "ZBCN",
+    "GRASS"
     ]
   },
 
   "pool_eligibility": {
     "min_open_score": 70.0,
-    "min_pool_liquidity_usd": 250000,
-    "min_24h_volume_usd": 1000000,
+    "min_pool_liquidity_usd": 25000,
+    "min_24h_volume_usd": 5000,
     "allowed_bin_steps": [10, 20, 25, 50, 100],
     "min_fee_tvl_ratio": 0.05,
     "max_volatility_pct": 50,
@@ -24,7 +34,7 @@
   "position_sizing": {
     "min_position_usd": 20,
     "default_max_position_usd": 100,
-    "max_opens_per_cycle": 3
+    "max_opens_per_cycle": 6
   },
 
   "windows": {

@@ -12,12 +12,22 @@ from typing import Any, Dict
 # Anything not in these sets is gated out before scoring.
 # --------------------------------------------------------------------------
 STABLECOINS = {
-    "USDC", "USDT", "PYUSD", "USDG"
+    "USDC", "USDT", "USDG"
 }
 
 HIGH_CAPS = {
-    "SOL", "WSOL", "WBTC", "CBBTC", "WETH", "ETH",
-    "JSOL", "MSOL", "BSOL", "ZEC",
+    "SOL", "WSOL", 
+    "CBT", "WBTC", "CBBTC", 
+    "ETH", "WETH",
+    "XRP", "cbRXP",
+    "ZEC",
+    "TAO",
+    "XMR",
+    "BMT",
+    "QNT",
+    "VIRTUAL",
+    "ZBCN",
+    "GRASS"
 }
 
 # --------------------------------------------------------------------------
