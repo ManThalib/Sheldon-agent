@@ -80,8 +80,8 @@ Tunables defined in `lp_scoring.py`:
 
 ## Rail Constants (George defaults)
 
-Defined in `run_cycle.py`:
-- `MIN_POSITION_USD = 15.0` — minimum position value
+Defined in `strategy.py`:
+- `MIN_POSITION_USD = 20.0` — minimum position value
 - `DEFAULT_MAX_POSITION_USD = 100.0` — maximum position value
 - `DEFAULT_MAX_RANGE_WIDTH = 200` — max range width in bins/ticks
 - `DEFAULT_MAX_SLIPPAGE_BPS = 100` — max slippage in bps (1%)

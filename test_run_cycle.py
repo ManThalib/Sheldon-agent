@@ -257,18 +257,18 @@ class CapitalPlanTests(unittest.TestCase):
         wallet = {"idle_usdc": 100.0, "deployable_usdc": 200.0}
         plan = capital_plan(wallet)
         self.assertTrue(plan["open_eligible"])
-        self.assertEqual(plan["suggested_position_usdc"], 50.0)
+        self.assertEqual(plan["suggested_position_usdc"], 100.0)
 
     def test_open_not_eligible_low_idle(self):
         wallet = {"idle_usdc": 10.0, "deployable_usdc": 200.0}
         self.assertFalse(capital_plan(wallet)["open_eligible"])
 
     def test_open_not_eligible_low_deployable(self):
-        wallet = {"idle_usdc": 100.0, "deployable_usdc": 40.0}
+        wallet = {"idle_usdc": 100.0, "deployable_usdc": 10.0}
         plan = capital_plan(wallet)
         self.assertFalse(plan["open_eligible"])
-        # suggested_position_usd should still be min(deployable*0.25, 100)
-        self.assertEqual(plan["suggested_position_usdc"], 10.0)
+        # suggested_position_usd should be min(deployable*0.75, 100)
+        self.assertEqual(plan["suggested_position_usdc"], 7.5)
 
     def test_suggested_capped_at_max(self):
         wallet = {"idle_usdc": 1000.0, "deployable_usdc": 1000.0}
@@ -353,11 +353,12 @@ class StrategyTests(unittest.TestCase):
         candidates = [self._candidate(90.0, self._pool(90.0, 1.0, 4))]
         self.assertEqual(build_strategies(candidates, wallet), [])
 
-    def test_strategy_sizing_is_25_percent(self):
+    def test_strategy_sizing_is_75_percent(self):
         wallet = {"idle_usdc": 100.0, "deployable_usdc": 200.0}
         candidate = self._candidate(90.0, self._pool(90.0, 1.0, 4))
         strategies = build_strategies([candidate], wallet)
-        self.assertEqual(strategies[0]["suggested_usdc"], 50.0)
+        # 75% of 200 = 150, capped at DEFAULT_MAX_POSITION_USD (100).
+        self.assertEqual(strategies[0]["suggested_usdc"], 100.0)
 
     def test_strategy_range_centered(self):
         wallet = {"idle_usdc": 100.0, "deployable_usdc": 100.0}
@@ -582,7 +583,7 @@ class RunCycleIntegrationTests(unittest.TestCase):
         self.assertEqual(report["wallet"]["idle_usdc"], 100.0)
         self.assertEqual(report["wallet"]["dust_total_usdc"], 20.0)
         self.assertEqual(report["wallet"]["deployable_usdc"], 120.0)
-        # 25% of deployable = 30, idle > 15 => eligible.
+        # 75% of deployable = 90, idle > 20 => eligible.
 
     def _write_signals_with_funding(self, wallet_scan, signals_dir, report=None):
         """Mirror main(): run the funding plan + gates before write_signals."""
@@ -628,9 +629,9 @@ class RunCycleIntegrationTests(unittest.TestCase):
                 {"mint": USDC_MINT, "amount_raw": "100000000", "amount_ui": 100.0,
                  "decimals": 6, "price_usd": 1.0, "total_value_usd": 100.0,
                  "is_native_sol": False},
-                {"mint": SOL_MINT, "symbol": "SOL", "amount_raw": "160000000",
-                 "amount_ui": 0.16, "decimals": 9, "price_usd": 117.0,
-                 "total_value_usd": 18.72, "is_native_sol": True},
+                {"mint": SOL_MINT, "symbol": "SOL", "amount_raw": "404615384",
+                 "amount_ui": 0.404615384, "decimals": 9, "price_usd": 117.0,
+                 "total_value_usd": 47.34, "is_native_sol": True},
                 {"mint": "DUST", "symbol": "DUST", "amount_raw": "1000000000",
                  "amount_ui": 1.0, "decimals": 9, "price_usd": 20.0,
                  "total_value_usd": 20.0, "is_native_sol": False},
@@ -694,9 +695,9 @@ class RunCycleIntegrationTests(unittest.TestCase):
         self.assertEqual(prep["input_mint"], USDC_MINT)
         self.assertEqual(prep["output_mint"], SOL_MINT)
         self.assertEqual(prep["direction"], "buy")
-        # Position = 25% of deployable (100 USDC) = $25; half = $12.50.
-        # delta = 12.5 / 117 SOL; +2% buffer, in USDC base units.
-        delta_raw = int(12.5 / 117 * 1e9)
+        # Position = 75% of deployable (100 USDC) = $75; half = $37.50.
+        # delta = 37.5 / 117 SOL; +2% buffer, in USDC base units.
+        delta_raw = int(37.5 / 117 * 1e9)
         expected_cost = math.ceil((delta_raw / 1e9) * 117 * 1.02 * 1e6)
         self.assertEqual(int(prep["amount"]), expected_cost)
         self.assertGreater(int(prep["amount"]), 0)

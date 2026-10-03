@@ -33,7 +33,7 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     data = _load_json(_SHELDON_POLICY_PATH)
     policy: Dict[str, Any] = {}
     sizing = data.get("position_sizing") or {}
-    policy["min_position_usd"] = float(sizing.get("min_position_usd", 15.0))
+    policy["min_position_usd"] = float(sizing.get("min_position_usd", 20.0))
     policy["default_max_position_usd"] = float(sizing.get("default_max_position_usd", 100.0))
     policy["max_opens_per_cycle"] = int(sizing.get("max_opens_per_cycle", 3))
 
@@ -53,6 +53,16 @@ def _load_sheldon_policy() -> Dict[str, Any]:
 
     intent = data.get("execution_intent") or {}
     policy["default_max_slippage_bps"] = int(intent.get("default_max_slippage_bps", 100))
+
+    add = data.get("add_policy") or {}
+    policy["add_enabled"] = bool(add.get("enabled", False))
+    policy["add_idle_max_usd"] = float(add.get("idle_max_usd", 20.0))
+    policy["add_min_usd"] = float(add.get("min_add_usd", 5.0))
+    policy["add_cooldown_hours"] = float(add.get("cooldown_hours", 6.0))
+    policy["add_max_per_day"] = int(add.get("max_adds_per_day", 6))
+    policy["add_y_side_room_pct"] = float(add.get("y_side_room_pct", 25.0))
+    policy["add_max_wallet_scan_age_seconds"] = float(
+        add.get("max_wallet_scan_age_seconds", 900.0))
 
     return policy
 
@@ -100,8 +110,8 @@ def get_policy() -> Dict[str, Any]:
 
 
 def suggested_position_usd(deployable_usdc: float) -> float:
-    """25% of deployable capital, capped at the per-position rail."""
-    return min(deployable_usdc * 0.25, DEFAULT_MAX_POSITION_USD)
+    """75% of deployable capital, capped at the per-position rail."""
+    return min(deployable_usdc * 0.75, DEFAULT_MAX_POSITION_USD)
 
 
 def open_eligible(wallet: Dict[str, Any]) -> bool:

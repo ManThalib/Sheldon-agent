@@ -22,7 +22,7 @@
   },
 
   "position_sizing": {
-    "min_position_usd": 15,
+    "min_position_usd": 20,
     "default_max_position_usd": 100,
     "max_opens_per_cycle": 3
   },
@@ -36,5 +36,17 @@
 
   "execution_intent": {
     "default_max_slippage_bps": 100
-  }
+  },
+
+  "add_policy": {
+    "enabled": true,
+    "idle_max_usd": 20,
+    "min_add_usd": 5,
+    "cooldown_hours": 6,
+    "max_adds_per_day": 6,
+    "y_side_room_pct": 25,
+    "max_wallet_scan_age_seconds": 900
+  },
+
+  "remove_policy": {}
 }

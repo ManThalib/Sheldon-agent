@@ -125,7 +125,7 @@ v2): `CLOSE` → `close`, `COLLECT_FEES` → `claim_fees`, `OPEN_CANDIDATE` →
 ### OPEN Signal Allocation Logic
 
 ```
-position_usd = min(idle_usdc * 0.25, DEFAULT_MAX_POSITION_USD)
+position_usd = min(deployable_usdc * 0.75, DEFAULT_MAX_POSITION_USD)
                >= MIN_POSITION_USD required
 
 half_usd = position_usd / 2

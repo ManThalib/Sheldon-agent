@@ -155,7 +155,7 @@ George) can distinguish "bad position" from "bad data".
 
 Requirements (returns `None` if any unmet): supported dex, `_pool` present,
 positive prices/decimals, non-zero center index, idle USDC > 0, and the
-allocation rails (min $15, max $100, 25% of idle USDC, 50/50 split,
+allocation rails (min $20, max $100, 75% of deployable USDC, 50/50 split,
 ±100 bin/tick range).
 
 ### `_range_center(pool, dex)`
@@ -235,7 +235,7 @@ See Backtesting above.
 | `il_conc_max` | 4.0 | Max concentration multiplier |
 | `fee_expect_max_days` | 30.0 | Cap on days used in fee expectation |
 
-Signal rails (in run_cycle.py): `MIN_POSITION_USD` 15, `DEFAULT_MAX_POSITION_USD`
+Signal rails (in run_cycle.py): `MIN_POSITION_USD` 20, `DEFAULT_MAX_POSITION_USD`
 100, `DEFAULT_MAX_RANGE_WIDTH` 200, `DEFAULT_MAX_SLIPPAGE_BPS` 100,
 `SUPPORTED_DEXES` {meteora, raydium, orca}.
 
