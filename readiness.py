@@ -77,15 +77,30 @@ def _created_epoch(created_at: str) -> float:
 # --------------------------------------------------------------------------
 # Raw wallet scan loading
 # --------------------------------------------------------------------------
-def load_raw_wallet(wallet_scans_dir: str) -> Dict[str, Any]:
-    """Load the newest raw Missy wallet scan (per-mint amounts, decimals).
+def load_raw_wallet(wallet_scans_dir: str, wallet_id: str = "main") -> Dict[str, Any]:
+    """Load the newest raw Missy wallet scan for ``wallet_id``.
 
-    ``newest_file`` returns the ``wallet_screen-latest.json`` symlink whose
-    target is always the newest scan, so content and mtime are fresh.
+    MAIN (the policy wallet) reads ``wallet_screen-latest.json`` — the
+    symlink the MAIN cron always refreshes. Mirror wallets (C.2+) read
+    ``wallet_screen-<id>-latest.json`` when their own cron exists; until a
+    mirror cron runs, mirrors have no scan and funding for mirror legs is
+    the mirror's own business (George's registry gates on registered keys,
+    not on scans).
     """
     import lp_scoring  # local import: lp_scoring owns file discovery
 
-    path = lp_scoring.newest_file(wallet_scans_dir, "wallet_screen")
+    if wallet_id != "main":
+        mirror_path = os.path.join(
+            wallet_scans_dir, f"wallet_screen-{wallet_id}-latest.json"
+        )
+        if not os.path.exists(mirror_path):
+            return {
+                "path": mirror_path, "mtime": 0.0, "assets": [],
+                "error": f"no wallet scan for wallet_id '{wallet_id}'",
+            }
+        path = mirror_path
+    else:
+        path = lp_scoring.newest_file(wallet_scans_dir, "wallet_screen")
     if not path:
         return {"path": None, "mtime": 0.0, "assets": [], "error": "no wallet scan found"}
     try:

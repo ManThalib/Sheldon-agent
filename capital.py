@@ -72,8 +72,11 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
 
     dust_total = sum(a["value_usd"] for a in dust_assets)
 
+    # Wallet capital summary and multi-wallet tag.
+    wallet_id = (data.get("wallet_id") or "main").strip() or "main"
     return {
         "wallet": wallet,
+        "wallet_id": wallet_id,
         "total_usd": total_usd,
         "idle_usdc": idle_usdc,
         "dust_total_usdc": dust_total,

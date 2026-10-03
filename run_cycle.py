@@ -22,6 +22,7 @@ from pathlib import Path
 import lp_scoring
 import range_state
 from capital import DUST_MIN_USD
+from idle_sweep import execute_sweep, load_add_state, plan_sweep
 from readiness import (
     build_prep_swap_signal,
     gate_prep_swaps,
@@ -242,6 +243,7 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
         "signal_id": f"sheldon-{base}-{idx}",
         "action": "open",
         "dex": dex,
+        "wallet_id": "main",
         "pool_address": pool.get("pool_address"),
         "side": "bidirectional",
         "bin_range": {"lower": bin_range["lower"], "upper": bin_range["upper"]},
@@ -264,6 +266,7 @@ def _build_dust_swap_signal(asset: dict, idx: int, base: int) -> dict:
     return {
         "signal_id": f"sheldon-{base}-{idx}",
         "action": "swap_to_usdc",
+        "wallet_id": "main",
         "mint": asset["mint"],
         "symbol": asset["symbol"],
         "decimals": asset["decimals"],
@@ -410,6 +413,7 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
                 "signal_id": f"sheldon-{base}-{idx}",
                 "action": "claim_fees" if action == "COLLECT_FEES" else "close",
                 "dex": dex,
+                "wallet_id": v.get("wallet_id") or "main",
                 "pool_address": pool_addr,
                 "position_id": v.get("position"),
                 "side": "bidirectional",
@@ -442,6 +446,12 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
         idx += 1
 
     return created, review
+
+
+def report_wallet_mtime(report: dict) -> float:
+    """Wallet scan mtime as reported by readiness.load_raw_wallet."""
+    funding = report.get("funding") or {}
+    return float(funding.get("wallet_mtime") or 0.0)
 
 
 def _wake_george(signals_created: list, review: list):
@@ -489,6 +499,16 @@ def append_log(report: dict, memory_dir: str, signals_created: list, review: lis
         )
         for note in funding.get("notes") or []:
             lines.append(f"  - funding note: {note}")
+    sweep = report.get("idle_sweep") or {}
+    if sweep:
+        lines.append(
+            f"- idle sweep: {sweep.get('decision', 'skip')} — "
+            f"net_idle=${sweep.get('idle_net_usd', 0.0):.2f} "
+            f"queued={sweep.get('queued_committed_usdc', 0.0):.2f} — "
+            f"{sweep.get('reason') or sweep.get('signal_id', '')}"
+        )
+        for s in sweep.get("skipped") or []:
+            lines.append(f"  - sweep target `{s.get('pool_address')}` — {s.get('reason')}")
     grace = report.get("out_of_range_grace") or {}
     if grace.get("deferred_positions"):
         lines.append(
@@ -633,7 +653,40 @@ def main() -> int:
     signals_created = []
     review = []
     if args.write_signals:
-        signals_created, review = write_signals(report, args.signals_dir, args.positions_dir)
+        # Approved design: open signals are written FIRST, then the
+        # idle-capital sweep reads the queue (pending opens/prep swaps are
+        # committed capital) and sweeps only the leftover below the open
+        # floor into the best tracked position. A failure here degrades to
+        # the old behavior (no sweep), never blocks opens.
+        signals_created, review = write_signals(
+            report, args.signals_dir, args.positions_dir)
+
+        add_state = load_add_state(args.state_dir)
+        sweep_signal, sweep_info = plan_sweep(
+            report, args.signals_dir, report_wallet_mtime(report), add_state,
+            state_dir=args.state_dir,
+        )
+        report["idle_sweep"] = sweep_info
+        if sweep_signal is not None:
+            ok, err = execute_sweep(
+                sweep_signal, args.signals_dir, add_state,
+                state_dir=args.state_dir,
+            )
+            if ok:
+                sweep_path = os.path.join(
+                    args.signals_dir, f"{sweep_signal['signal_id']}.json")
+                signals_created.append(sweep_path)
+                report["idle_sweep"]["decision"] = "emitted"
+            else:
+                report["idle_sweep"]["decision"] = "write_failed"
+                report["idle_sweep"]["reason"] = err
+                review.append({
+                    "pool_address": sweep_signal.get("pool_address"),
+                    "dex": sweep_signal.get("dex"),
+                    "score": sweep_signal.get("score"),
+                    "evidence": None,
+                    "reason": f"idle sweep write failed: {err}",
+                })
         _wake_george(signals_created, review)
 
     append_log(report, args.memory_dir, signals_created, review)
