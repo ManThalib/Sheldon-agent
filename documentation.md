@@ -123,7 +123,8 @@ Each component returns `(points, known)`. Unknown inputs still contribute
 
 ## Verdict Thresholds (config: `pool_thresholds`, `position_thresholds`)
 
-- Pool: open ≥ 70.0, watch ≥ 55.0
+- Pool: open ≥ 70.0, watch ≥ 55.0 (adaptive mode: quantiles of the scored
+  universe, floored by `max(floor_open, sheldon_policy min_open_score)`)
 - Position: close < 40.0, review < 60.0, hold ≥ 60.0
 - **Open/close separation**: CLOSE requires every component scored on known
   data; any unknown component caps at REVIEW. Policy CLOSE (off-universe /
@@ -149,33 +150,76 @@ Each position result carries:
 `policy_close: true` marks the off-universe hard gate. Consumers (dashboards,
 George) can distinguish "bad position" from "bad data".
 
-## Signal Building (run_cycle.py, unchanged in v2)
+## Signal Building (run_cycle.py)
 
-### `_build_open_signal(v, idx, base)`
+### `_build_open_signal(strategy, v, idx, base)`
 
 Requirements (returns `None` if any unmet): supported dex, `_pool` present,
-positive prices/decimals, non-zero center index, idle USDC > 0, and the
-allocation rails (min $20, max $100, 75% of deployable USDC, 50/50 split,
-±100 bin/tick range).
+pool passes `meteora_bin_step_allowed` (fail-closed), score present and ≥
+policy `min_open_score`, positive prices/decimals, `suggested_usdc >=
+MIN_POSITION_USD`, and a non-`None` `strategy["bin_range"]` from
+`strategy.build_strategies` (volatility-adaptive, not fixed ±100). Produces a
+50/50-split `open` intent with `max_slippage_bps=100`.
 
-### `_range_center(pool, dex)`
+Open candidates first pass `_filter_open_candidates`: dedup (one position per
+pool), duplicate-pool, `center == 0` refusal, trading window/blackout
+(`_in_trading_window`, Asia/Shanghai), policy TVL/volume/score gates, and the
+Meteora `allowed_bin_steps` rail. `build_strategies` keeps the top
+`max_opens_per_cycle=3` by score. `plan_funding` + `gate_prep_swaps` then split
+funded strategies (→ open) from shortfalls (→ prep `swap`) and surpluses
+(→ sell `swap`). Opens are written first so `idle_sweep.plan_sweep` can treat
+pending opens/preps as committed capital.
+
+Other signals: `CLOSE`/`REBALANCE` (post-grace) → `close`, `COLLECT_FEES` →
+`claim_fees`, dust assets → `swap_to_usdc`, funding deltas → prep `swap`,
+leftover idle → `add_liquidity` sweep. HOLD/REVIEW/WATCH/IGNORE produce no signal.
+
+### `_range_center(pool, dex)` (also `strategy._range_center`)
 
 - Meteora: `active_bin_id`
 - Raydium/Orca: `current_tick` → `current_tick_index` → `active_bin_id`
 
-### `_read_usdc_balance()`
+### Capital input (`capital.summarize_wallet`, `readiness.load_raw_wallet`)
 
-1. `SHELDON_IDLE_USDC` env var
-2. `/data/missy-data/wallet_balances.json` → `USDC.usd_value`
-3. Solana RPC via George's config
-4. 0.0 (skips OPEN signal)
+1. Newest Missy wallet scan under `--wallet-scans-dir`
+   (`wallet_screen-latest.json`): idle USDC + dust assets + per-token balances
+2. 0.0 (skips OPEN signal)
+
+No `SHELDON_IDLE_USDC` env var, no `wallet_balances.json` cache, no RPC lookup.
+
+## Strategy, Readiness, Grace, Sweep
+
+- `strategy.py`: `get_policy()` (from `sheldon_policy.json`), `suggested_position_usd`
+  (`min(deployable*0.75, max)`), `open_eligible`, `open_eligible` gate, `build_strategies`
+  (top 3 by score), `adaptive_half_width` (see architecture.md), `_range_center`,
+  `meteora_bin_step_allowed` (fail-closed), `capital_plan`. Meteora width capped by
+  George `execution_limits.json` `max_meteora_range_width=70`.
+- `readiness.py`: `plan_funding`, `gate_prep_swaps`, `build_prep_swap_signal`,
+  `load_raw_wallet`. Rails: `SOL_RESERVE_LAMPORTS=20M`, `BUY_BUFFER_PCT=2.0`,
+  `MIN_PREP_SWAP_USD=1.0`, `SELL_SURPLUS_MIN_USD=2.0`,
+  `MAX_PREP_SWAPS_PER_MINT_PER_HOUR=3`, `PREP_CONFIRM_GRACE_SECONDS=60`,
+  `MAX_WALLET_SCAN_AGE_SECONDS=180`.
+- `range_state.py`: `position_out_of_range` (price bounds, else `in_range` flag;
+  unknown = in-range), `update_out_of_range_counts`,
+  `out_of_range_position_verdict` (CLOSE/REBALANCE → HOLD on runs 1..`ALLOWED_OUT_OF_RANGE_RUNS-1=1`),
+  `state/out_of_range.json`.
+- `idle_sweep.py`: `plan_sweep`/`execute_sweep`, `load_add_state`,
+  `state/add_state.json`, `RESERVATION_MAX_AGE_SECONDS=3600`,
+  floor-score epsilon 0.01 below `min_open_score`.
+- `capital.py`: `summarize_wallet`, `USDC_MINT`, `SOL_MINT`,
+  `RESERVED_MINTS` (SOL + owner hold), `DUST_MIN_USD=1.0`,
+  `deployable = idle + dust_total`.
+- `profiles.py` / `models.py`: legacy, unused (nothing imports them).
 
 ## Backtesting
 
 `backtest.py` replays the Missy scan archive through the scoring engine:
 
 ```
-python3 backtest.py [--data-dir /data/missy-data] [--horizon 4] [--json]
+python3 backtest.py [--data-dir /data/missy-data] [--pools-dir D] [--positions-dir D]
+  [--horizon 4] [--width 200] [--position-value-usd 100]
+  [--entry-cost-bps 50] [--exit-cost-bps 50] [--claim-cost-usd 0.02]
+  [--bootstrap-samples 1000] [--seed 42] [--dynamic] [--json] [--detail]
 ```
 
 - **Pool replay**: scores each historical `pool_scan`; for pools that were
@@ -190,6 +234,22 @@ python3 backtest.py [--data-dir /data/missy-data] [--horizon 4] [--json]
 Caveat: scans before 2026-09-25 15:16 UTC lack Jupiter price enrichment
 (`token_*_price_usd`), so older scans score lower on depeg/fee components.
 The backtest reports per-scan input completeness so you can segment.
+Beyond verdict replay it computes synthetic PnL per OPEN_CANDIDATE (entry/exit
+bps + claim USD on `--position-value-usd`), walk-forward stats, and bootstrap
+resampling (`--bootstrap-samples`, `--seed`).
+
+`tuner.py` usage:
+
+```
+python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N]
+  [--candidates 30] [--seed 42] [--train-frac 0.8]
+  [--output profiles.tuned.json] [--apply]
+```
+
+Randomly perturbs base pool weights, evaluates train/validation (last
+`1-train_frac` of scans) mean PnL via the backtest, keeps candidates beating
+the baseline on validation, writes the top 10 + best to `--output`.
+`--apply` overwrites `profiles.json` (backup `profiles.json.bak.<ts>`).
 
 ## CLI Arguments
 
@@ -199,16 +259,20 @@ The backtest reports per-scan input completeness so you can segment.
 |---|---|---|
 | `--pools-dir` | `/data/missy-data/pool_screens` | Pool scan directory |
 | `--positions-dir` | `/data/missy-data/position_scans` | Position scan directory |
+| `--wallet-scans-dir` | `/data/missy-data/wallet_screens` | Wallet scan directory |
 | `--json` | — | Full JSON report to stdout |
 
 ### `run_cycle.py`
 
 | Arg | Default | Description |
 |---|---|---|
-| `--pools-dir` / `--positions-dir` | Missy data dirs | Input directories |
+| `--pools-dir` | `/data/missy-data/pool_screens` | Pool scan directory |
+| `--positions-dir` | `/data/missy-data/position_scans` | Position scan directory |
+| `--wallet-scans-dir` | `/data/missy-data/wallet_screens` | Wallet scan directory |
 | `--write-signals` | — | Write George-schema signal files |
 | `--signals-dir` | george signals/pending | Signal output directory |
 | `--memory-dir` | sheldon memory | Daily markdown log directory |
+| `--state-dir` | `<repo>/state` | Grace + sweep state directory |
 | `--json` | — | Full JSON report to stdout |
 | `--max-age-seconds` | `3900.0` | Data freshness window |
 
@@ -217,7 +281,31 @@ Note: Missy's cron cadence has gaps > 3900 s (e.g. 06:59 → 11:56); raise
 
 ### `backtest.py`
 
-See Backtesting above.
+| Arg | Default | Description |
+|---|---|---|
+| `--data-dir` | `/data/missy-data` | Base dir (pools/positions default under it) |
+| `--pools-dir` / `--positions-dir` | `<data-dir>/pool_screens` etc. | Override scan dirs |
+| `--horizon` | `4` | Scans to look ahead |
+| `--width` | `200` | Would-be open range width in bins/ticks |
+| `--position-value-usd` | `100` | Synthetic position size |
+| `--entry-cost-bps` / `--exit-cost-bps` | `50` / `50` | Swap costs |
+| `--claim-cost-usd` | `0.02` | Flat claim cost per close |
+| `--bootstrap-samples` | `1000` | Bootstrap resamples |
+| `--seed` | `42` | Random seed |
+| `--dynamic` | — | Rolling history + adaptive thresholds + regime weights |
+| `--json` / `--detail` | — | JSON output / per-candidate rows |
+
+### `tuner.py`
+
+| Arg | Default | Description |
+|---|---|---|
+| `--data-dir` / `--pools-dir` | `/data/missy-data` etc. | Scan dirs |
+| `--horizon` / `--width` | `4` / `200` | Backtest horizon/width |
+| `--candidates` | `30` | Weight perturbations tried |
+| `--seed` | `42` | Random seed |
+| `--train-frac` | `0.8` | Train split (rest is validation) |
+| `--output` | `profiles.tuned.json` | Search output |
+| `--apply` | — | Overwrite `profiles.json` (with backup) |
 
 ## Constants (config: `constants`)
 
@@ -234,15 +322,33 @@ See Backtesting above.
 | `il_conc_full_width_ticks` | 2000 | Reference range width for conc = 1 |
 | `il_conc_max` | 4.0 | Max concentration multiplier |
 | `fee_expect_max_days` | 30.0 | Cap on days used in fee expectation |
+| `il_vol_window_days` | 1.0 | Present in `profiles.json` but currently unread by code |
 
-Signal rails (in run_cycle.py): `MIN_POSITION_USD` 20, `DEFAULT_MAX_POSITION_USD`
-100, `DEFAULT_MAX_RANGE_WIDTH` 200, `DEFAULT_MAX_SLIPPAGE_BPS` 100,
+Strategy rails live in `sheldon_policy.json` (via `strategy.get_policy()`):
+`min_position_usd` 20, `default_max_position_usd` 100,
+`max_opens_per_cycle` 3, `min_open_score` 70, `min_pool_liquidity_usd` 250k,
+`min_24h_volume_usd` 1M, `allowed_bin_steps` [10,20,25,50,100],
+`min_fee_tvl_ratio` 0.05, `max_volatility_pct` 50, `max_turnover_ratio` 50,
+`default_max_slippage_bps` 100, windows `00:00-23:59` + `Asia/Shanghai`,
+`add_policy` (enabled, idle_max 20, min_add 5, cooldown 6h, max/day 6,
+y_side_room 25%, max_wallet_scan_age 900). Adaptive widths:
+`WIDTH_FACTOR` 0.5, `MIN_HALF_WIDTH` 10, `MAX_HALF_WIDTH` 1000,
+Meteora max 70 bins inclusive (from George `execution_limits.json`).
 `SUPPORTED_DEXES` {meteora, raydium, orca}.
+
+Dynamic knobs (config: `dynamic`): rolling percentiles (`blend_alpha`,
+`min_samples` — `profiles.json` ships 10, code default 20), regime shifts,
+adaptive-threshold quantiles (floor `max(floor_open, policy min_open_score)`),
+expected-PnL override (1d horizon, 50bps entry/exit, $0.02 claim, $0.01 margin).
+
+Universe note: scoring enforces `lp_scoring.STABLECOINS/HIGH_CAPS`
+(`USDC,USDT,PYUSD,USDG` + `SOL,WSOL,WBTC,CBBTC,WETH,ETH,JSOL,MSOL,BSOL,ZEC`);
+`sheldon_policy.json:universe` is wider — the scoring lists win.
 
 ## Tests
 
 ```
-python3 -m unittest test_lp_scoring test_run_cycle test_dynamic
+python3 -m unittest test_lp_scoring test_run_cycle test_dynamic test_idle_sweep test_range_state
 ```
 
 Covers config validation, classification, every pool/position component,

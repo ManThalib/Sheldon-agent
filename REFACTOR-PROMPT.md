@@ -1,4 +1,14 @@
-# Sheldon Scoring Engine Refactor Prompt
+# Sheldon Scoring Engine Refactor Prompt — SUPERSEDED (archived)
+
+> This handoff describes the pre-dynamic, pre-backtest state and is kept for
+> history only. Do not follow its "What NOT to build" constraints — all of them
+> have since been built: `dynamic.py` (adaptive thresholds/regime/percentiles/
+> expected-PnL), `backtest.py`, `tuner.py` + `profiles.tuned.json`,
+> `profiles.json` externalized config, `capital.py` / `strategy.py` /
+> `readiness.py` / `range_state.py` / `idle_sweep.py`, and `sheldon_policy.json`.
+> Paths below (`/data/.openclaw/.../scoring/`) are stale; code now lives in this
+> repo root. Verification vectors (`5rCf…≈69 WATCH`, `ENy8…≈68 HOLD`) are stale.
+> See `README.md`, `architecture.md`, `documentation.md` for current behavior.
 
 Self-contained handoff prompt for the next session.
 
