@@ -418,3 +418,85 @@ python3 -m unittest test_lp_scoring test_run_cycle test_dynamic test_idle_sweep 
 Covers config validation, classification, every pool/position component,
 estimation math, the open/close data-quality rule, end-to-end cycles on
 synthetic scans, and the dynamic calibration layer.
+
+## Pool-to-George Pipeline (Missy → George open_position)
+
+This scheme documents the end-to-end flow of how Missy pool scans become
+George-schema `open` signals.
+
+### Overview
+
+```mermaid
+flowchart TD
+    P[Missy Pool Scan] --> S[score_pool_missy]
+    S --> V[Verdict: OPEN_CANDIDATE/WATCH/IGNORE]
+    V -->|OPEN_CANDIDATE| F[_filter_open_candidates]
+    F -->|Pass| B[build_strategies]
+    B -->|Top 20 by score| R[_build_open_signal]
+    R -->|Signal JSON| G[George pending queue]
+```
+
+### Gates Passed (9 gates in order)
+
+| # | Gate | Location | Pass Condition |
+|---|------|----------|----------------|
+| 1 | Trading window | `run_cycle.py:130` | Current Asia/Shanghai time inside `open_window_utc` |
+| 2 | Dedup | `run_cycle.py:143` | Pool not in active_positions (dedup) |
+| 3 | Duplicate scan | `run_cycle.py:147` | First candidate kept, rest skipped |
+| 4 | Range center | `run_cycle.py:152` | `active_bin_id` / `current_tick` known (not None) |
+| 5 | Missy eligibility | `run_cycle.py:159` | `pool.get("eligible")` is not False |
+| 6 | Legacy TVL | `run_cycle.py:167` | tvl >= 25,000 (when eligible is None) |
+| 7 | Legacy volume | `run_cycle.py:172` | volume_window >= 5,000 (when eligible is None) |
+| 8 | Bin step allowed | `run_cycle.py:177` | bin_step ∈ {10,20,25,50,100} for Meteora |
+| 9 | Score threshold | `run_cycle.py:182` | score >= 70.0 (min_open_score) |
+
+### Key Indicators Checked
+
+- `pool.eligible` – Missy's eligibility flag (Phase 2 gate)
+- `pool.tvl` – Total Value Locked (legacy gate: >= 25,000 USD)
+- `pool.volume_window` – 24h volume (legacy gate: >= 5,000 USD)
+- `pool.bin_step` – Meteora bin step; must be in allowed set
+- `pool.active_bin_id` / `current_tick` / `current_tick_index` – Current tick/bin
+- `pool.score` – Missy's pool score (>= 70.0 to open)
+- `pool.volatility` – 7-day volatility percent
+- `pool.token_x_price_usd`, `pool.token_y_price_usd` – Token prices USD
+- `pool.token_x_decimals`, `pool.token_y_decimals` – Token decimals
+
+### Capital Used
+
+- **MIN_POSITION_USD** = $20 (minimum per position, from `sheldon_policy.json`)
+- **Suggested position** = min(deployable_usdc × 0.75, $100) (75% of deployable, capped)
+- **50/50 USD split** between token X and token Y
+- **Amount calculation**: `amount_x = (half_usd / px_x) × 10^dec_x`, same for Y
+- **Max opens per cycle** = 20 (from `max_opens_per_cycle` in policy; strategy keeps top 3 by score)
+
+### Range Calculation
+
+- **Center**: `active_bin_id` (Meteora) or `current_tick`/`current_tick_index` (Raydium/Orca)
+- **Adaptive half-width**: `adaptive_half_width(pool)` using volatility and bin_step
+  - Meteora: `step_ratio = 1 + bin_step/10000`
+  - Raydium/Orca: `step_ratio = 1.0001^tick_spacing`
+  - `half_width = clamp(ceil(log(1 + f) / log(step_ratio)), MIN=10, MAX=max_half_width)`
+- **Max Meteora range**: 70 bins inclusive → `MAX_HALF_WIDTH = (70-1)//2 = 34`
+- **Range**: `lower = center - half_width`, `upper = center + half_width`
+- **Width constraint**: `upper - lower + 1 <= 70` bins (George executor rail)
+
+### Signal Schema for George
+
+```json
+{
+  "signal_id": "sheldon-1725672345-1",
+  "action": "open",
+  "dex": "meteora",
+  "wallet_id": "main",
+  "pool_address": "SOL-USDC pool addr",
+  "side": "bidirectional",
+  "bin_range": {"lower": -45, "upper": 25},
+  "liquidity": {"amount_x": "50000000000", "amount_y": "50000000000"},
+  "position_usd": 85.50,
+  "score": 82.3,
+  "score_policy": {"source": "missy", "version": 1, "min_open_score": 70.0},
+  "max_slippage_bps": 100,
+  "reason": "OPEN score=82.3 threshold=70.0 dex=meteora position_usd=85.50 center=1000"
+}
+```
