@@ -1,65 +1,72 @@
 {
-  "_comment": "Sheldon policy manifest. Strategy decisions live here. George enforces the matching execution rails from execution_limits.json.",
-
-  "scoring": {
-    "_comment": "source: 'missy' consumes Missy's default score; 'local' re-runs Sheldon's own scoring engine (kept for backtesting).",
-    "source": "missy",
-    "min_open_score": 70.0,
-    "version": 1
-  },
-
-  "universe": {
-    "stablecoins": [
-    "USDC", "USDT", "USDG"
-    ],
-    "high_caps": [
-    "SOL", "WSOL", 
-    "CBT", "WBTC", "CBBTC", 
-    "ETH", "WETH",
-    "XRP", "cbRXP",
-    "ZEC",
-    "TAO",
-    "XMR",
-    "BMT",
-    "QNT",
-    "VIRTUAL",
-    "ZBCN",
-    "GRASS"
-    ]
-  },
-
-  "pool_eligibility": {
-    "_comment_deprecated": "Missy now owns min_pool_liquidity_usd, min_24h_volume_usd, min_fee_tvl_ratio, max_volatility_pct, max_turnover_ratio. Sheldon keeps allowed_bin_steps, min_open_score, windows, sizing, add/remove policy.",
-    "min_open_score": 70.0,
-    "allowed_bin_steps": [10, 20, 25, 50, 100]
-  },
-
-  "position_sizing": {
-    "min_position_usd": 20,
-    "default_max_position_usd": 100,
-    "max_candidate_per_cycle": 20
-  },
-
-  "windows": {
-    "open_window_utc": "00:00-23:59",
-    "close_window_utc": "00:00-23:59",
-    "blackout_dates": [],
-    "timezone": "Asia/Shanghai"
-  },
-
-  "execution_intent": {
-    "default_max_slippage_bps": 100
-  },
-
-  "add_policy": {
-    "enabled": true,
-    "idle_max_usd": 20,
-    "min_add_usd": 5,
-    "cooldown_hours": 6,
-    "max_adds_per_day": 6,
-    "y_side_room_pct": 25,
-    "max_wallet_scan_age_seconds": 900
-  },
-
-  "remove_policy": {}
+ "_comment": "Sheldon policy manifest. Strategy decisions live here. George enforces the matching execution rails from execution_limits.json.",
+ "scoring": {
+  "_comment": "source: 'missy' consumes Missy's default pool score; 'local' re-runs Sheldon's own pool scoring (kept for backtesting). position_source: 'missy' scores positions from Missy's versioned position_features vector (policy stays Sheldon's); 'local' re-derives inputs from the raw position record.",
+  "source": "missy",
+  "min_open_score": 70.0,
+  "version": 1,
+  "position_source": "missy",
+  "position_features_version": 1
+ },
+ "universe": {
+  "stablecoins": [
+   "USDC",
+   "USDT",
+   "USDG"
+  ],
+  "high_caps": [
+   "SOL",
+   "WSOL",
+   "CBT",
+   "WBTC",
+   "CBBTC",
+   "ETH",
+   "WETH",
+   "XRP",
+   "cbRXP",
+   "ZEC",
+   "TAO",
+   "XMR",
+   "BMT",
+   "QNT",
+   "VIRTUAL",
+   "ZBCN",
+   "GRASS"
+  ]
+ },
+ "pool_eligibility": {
+  "_comment_deprecated": "Missy now owns min_pool_liquidity_usd, min_24h_volume_usd, min_fee_tvl_ratio, max_volatility_pct, max_turnover_ratio. Sheldon keeps allowed_bin_steps, min_open_score, windows, sizing, add/remove policy.",
+  "min_open_score": 70.0,
+  "allowed_bin_steps": [
+   10,
+   20,
+   25,
+   50,
+   100
+  ]
+ },
+ "position_sizing": {
+  "min_position_usd": 20,
+  "default_max_position_usd": 100,
+  "max_candidate_per_cycle": 20
+ },
+ "windows": {
+  "open_window_utc": "00:00-23:59",
+  "close_window_utc": "00:00-23:59",
+  "blackout_dates": [],
+  "timezone": "Asia/Shanghai"
+ },
+ "execution_intent": {
+  "default_max_slippage_bps": 100
+ },
+ "add_policy": {
+  "enabled": true,
+  "idle_max_usd": 20,
+  "min_add_usd": 5,
+  "cooldown_hours": 6,
+  "max_adds_per_day": 6,
+  "y_side_room_pct": 25,
+  "max_wallet_scan_age_seconds": 900
+ },
+ "remove_policy": {}
 }

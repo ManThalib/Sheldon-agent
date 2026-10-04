@@ -419,6 +419,8 @@ def load_scoring_policy() -> dict:
         "source": str(block.get("source", "local")).lower(),
         "version": int(block.get("version") or 0),
         "min_open_score": float(block.get("min_open_score") or 70.0),
+        "position_source": str(block.get("position_source", "local")).lower(),
+        "position_features_version": int(block.get("position_features_version") or 1),
     }
 
 
@@ -444,18 +446,41 @@ def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
 
     Falls back to Sheldon's local scoring when the pool record does not
     yet contain a Missy score (legacy scans or tests).
+
+    Policy gates are NOT outsourced: the universe hard-gate applies here
+    exactly as in score_pool (a high Missy score never opens an
+    off-universe pool), and Missy's own eligible=false discovery gates
+    block OPEN_CANDIDATE (score kept for audit, verdict capped at IGNORE).
     """
     if "score" not in pool:
         return score_pool(pool, ctx)
+    # Missy owns classification; trust its tag when present, else local.
     pair_class, sym_x, sym_y = classify_pair(pool)
+    if pool.get("pair_class"):
+        pair_class = pool["pair_class"]
     score = float(pool.get("score") or 0.0)
-    components = _missy_components(pool)
+    policy = load_scoring_policy()
+
+    if pair_class in ("off_universe", "unknown"):
+        return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
+                "dex": pool.get("dex"), "pair_class": pair_class,
+                "pair": [sym_x, sym_y], "score": 0.0, "components": {},
+                "reason": "off-universe pair: policy is stables/high-caps only",
+                "verdict": "IGNORE", "_pool": pool,
+                "score_policy": {"source": policy["source"],
+                                 "version": policy["version"]},
+                "dynamic": {"regime": None, "thresholds": "static"}}
+
     thresholds = (ctx or {}).get("thresholds") or get_config()["pool_thresholds"]
     verdict = pool_verdict(score, thresholds)
     reasons = []
-    if verdict == "OPEN_CANDIDATE":
+    if verdict == "OPEN_CANDIDATE" and pool.get("eligible") is False:
+        verdict = "IGNORE"
+        reasons.append(
+            f"score {score} >= open threshold but Missy gate rejected: "
+            f"{pool.get('rejected_reason') or 'eligible=false'}")
+    elif verdict == "OPEN_CANDIDATE":
         reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
-    policy = load_scoring_policy()
     return {
         "pool": pool.get("name"),
         "pool_address": pool.get("pool_address"),
@@ -463,7 +488,7 @@ def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
         "pair_class": pair_class,
         "pair": [sym_x, sym_y],
         "score": score,
-        "components": components,
+        "components": _missy_components(pool),
         "score_policy": {"source": policy["source"], "version": policy["version"]},
         "reason": "; ".join(reasons) if reasons else "Missy default score consumed",
         "verdict": verdict,
@@ -712,6 +737,10 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
     An RPC-failed scan (null tick bounds from a fallback/historical record)
     is unknown data, not out-of-range evidence: null bounds must never
     score 0 and must never read as verifiably out-of-range.
+
+    When the record carries Missy's edge_distance_frac (0 at edge, 1 at
+    center) and no price bounds, that feature drives the same curve; local
+    records without it keep the flat full-credit in-range behavior.
     """
     unknown_credit = float(get_config()["constants"]["unknown_credit"])
     lower, upper, current = _pos_price_bounds(pos)
@@ -722,6 +751,7 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
         edge_dist = min(current - lower, upper - current) / (span / 2.0)
         edge_frac = clamp((edge_dist - 0.0) / 0.5, 0.0, 1.0)
         return round(max_pts * (0.6 + 0.4 * edge_frac), 2), True
+    edge = pos.get("edge_distance_frac")
     if "in_range" in pos and pos["in_range"] is not None:
         # A fallback record with null tick bounds reports in_range=false
         # only because the scanner could not decode the range. Treat that
@@ -729,7 +759,12 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
         bounds_missing = pos.get("lower_bound") is None or pos.get("upper_bound") is None
         if bounds_missing and not pos["in_range"]:
             return round(max_pts * unknown_credit, 2), False
-        return (max_pts, True) if pos["in_range"] else (0.0, True)
+        if not pos["in_range"]:
+            return 0.0, True
+        if isinstance(edge, (int, float)):
+            edge_frac = clamp(float(edge), 0.0, 1.0)
+            return round(max_pts * (0.6 + 0.4 * edge_frac), 2), True
+        return round(max_pts, 2), True
     return round(max_pts * unknown_credit, 2), False
 
 
@@ -786,17 +821,34 @@ def score_position_depeg_exposure(pos: dict, max_pts: float, sym_x, sym_y,
     fx = peg_frac(sym_x, "token_x_price_usd")
     fy = peg_frac(sym_y, "token_y_price_usd")
 
-    # Single-sided detection from token amounts.
-    ui_x = ui_y = None
-    tx, ty = pos.get("token_x_amount"), pos.get("token_y_amount")
-    try:
-        ui_x = float((tx or {}).get("ui")) if tx else None
-        ui_y = float((ty or {}).get("ui")) if ty else None
-    except (TypeError, ValueError):
+    # Single-sided detection: Missy's feature vector first, token-amount
+    # fallback for local records.
+    held_x = None
+    single_sided = pos.get("single_sided")
+    if single_sided is None:
         ui_x = ui_y = None
+        tx, ty = pos.get("token_x_amount"), pos.get("token_y_amount")
+        try:
+            ui_x = float((tx or {}).get("ui")) if tx else None
+            ui_y = float((ty or {}).get("ui")) if ty else None
+        except (TypeError, ValueError):
+            ui_x = ui_y = None
+        if ui_x is not None and ui_y is not None and (ui_x > 0) != (ui_y > 0):
+            single_sided = True
+            held_x = ui_x > 0
+        else:
+            single_sided = False
+    else:
+        bias = pos.get("side_bias_x")
+        if isinstance(bias, (int, float)):
+            held_x = float(bias) > 0.5
 
-    if ui_x is not None and ui_y is not None and (ui_x > 0) != (ui_y > 0):
-        held = fx if ui_x > 0 else fy  # you're 100% in one token
+    if single_sided:
+        # You're 100% in one token; your exit already happened against the
+        # peg of whichever side you hold.
+        if held_x is None:
+            return round(max_pts * min(fx, fy), 2), False
+        held = fx if held_x else fy
         return round(max_pts * held, 2), known
     return round(max_pts * min(fx, fy), 2), known
 
@@ -820,7 +872,7 @@ def score_position_staleness(pos: dict, max_pts: float) -> tuple:
 
 
 def score_position(pos: dict, pools_by_addr: dict = None, ctx: dict = None) -> dict:
-    cfg = get_config()
+    """Local scoring path: derive inputs from the raw position record."""
     pair_class, sym_x, sym_y = classify_pair(pos)
     pool = (pools_by_addr or {}).get(pos.get("pool_address"))
     if pool is not None and pair_class == "unknown":
@@ -828,16 +880,104 @@ def score_position(pos: dict, pools_by_addr: dict = None, ctx: dict = None) -> d
     pool_name = pos.get("pool_name") or pos.get("name") or (pool or {}).get("name")
 
     if pair_class in ("off_universe", "unknown"):
-        return {"position_id": pos.get("position_id") or pos.get("position_address"),
-                "pool": pool_name,
-                "pool_address": pos.get("pool_address"),
-                "pair_class": pair_class, "pair": [sym_x, sym_y],
-                "score": 0.0, "components": {}, "verdict": "CLOSE",
-                "collect_fees": False,
-                "data_quality": {"unknown_components": [], "policy_close": True},
-                "reason": "off-universe pair: policy is stables/high-caps only",
-                "note": "off-universe pair: policy is stables/high-caps only"}
+        result = _position_policy_close(pos, pool_name, pair_class, sym_x, sym_y)
+        result["score_policy"] = {"source": "local", "features_version": 0}
+        return result
 
+    result = _score_position_core(pos, pool, pool_name, pair_class, sym_x, sym_y, ctx)
+    result["score_policy"] = {"source": "local", "features_version": 0}
+    return result
+
+
+def score_position_missy(pos: dict, pools_by_addr: dict = None,
+                         ctx: dict = None) -> dict:
+    """Missy-feature scoring path (scoring.position_source = "missy").
+
+    Sheldon still owns the policy: profile weights, thresholds, verdicts,
+    open/close separation. Only the *inputs* come from Missy's versioned
+    position_features block; feature gaps surface as unknown components and
+    cap the verdict exactly like any other missing data. Falls back to the
+    local path when the block is missing or its version differs.
+    """
+    policy = load_scoring_policy()
+    features = pos.get("position_features")
+    if (not isinstance(features, dict)
+            or int(features.get("version") or 0) != policy["position_features_version"]):
+        result = score_position(pos, pools_by_addr, ctx)
+        result["score_policy"] = {
+            "source": "local", "features_version": 0,
+            "fallback_reason": "position_features missing or version mismatch"}
+        return result
+
+    pool = (pools_by_addr or {}).get(
+        features.get("pool_address") or pos.get("pool_address"))
+    pair_class, sym_x, sym_y = classify_pair(features)
+    if pair_class == "unknown" and pool is not None:
+        # Features carry no symbols: take class AND symbols from the pool
+        # record so stable-side policy (depeg exposure) can fire.
+        pair_class, sym_x, sym_y = classify_pair(pool)
+    pool_name = (pool or {}).get("name")
+
+    if pair_class in ("off_universe", "unknown"):
+        result = _position_policy_close(
+            {"position_id": features.get("position_address") or pos.get("position_address"),
+             "pool_address": features.get("pool_address") or pos.get("pool_address")},
+            pool_name, pair_class, sym_x, sym_y)
+        result["score_policy"] = {
+            "source": "missy", "features_version": policy["position_features_version"]}
+        return result
+
+    view = _view_from_features(pos, features)
+    result = _score_position_core(
+        view, pool, pool_name, pair_class, sym_x, sym_y, ctx,
+        extra_unknown=[g for g in (features.get("gaps") or [])
+                       if isinstance(g, str)])
+    result["score_policy"] = {
+        "source": "missy", "features_version": policy["position_features_version"]}
+    return result
+
+
+def _view_from_features(pos: dict, features: dict) -> dict:
+    """Map Missy's feature vector onto the keys the scoring policy reads.
+
+    Format adaptation only — no scoring decisions here. Keys deliberately
+    left absent (prices, token amounts, il/fee estimates) route through the
+    policy's existing unknown-data paths.
+    """
+    gaps = set(features.get("gaps") or [])
+    return {
+        "position_id": features.get("position_address") or pos.get("position_address"),
+        "pool_address": features.get("pool_address") or pos.get("pool_address"),
+        "in_range": features.get("in_range"),
+        "lower_bound": features.get("range_lower"),
+        "upper_bound": features.get("range_upper"),
+        "edge_distance_frac": features.get("edge_distance_frac"),
+        "single_sided": features.get("single_sided"),
+        "side_bias_x": features.get("side_bias_x"),
+        "fees_usd": None if "fees_unknown" in gaps else features.get("fees_usd"),
+        "current_value_usd": (features.get("value_usd")
+                              if features.get("value_known") else None),
+        "days_open": features.get("days_open"),
+    }
+
+
+def _position_policy_close(record: dict, pool_name, pair_class, sym_x, sym_y) -> dict:
+    return {"position_id": record.get("position_id") or record.get("position_address"),
+            "pool": pool_name,
+            "pool_address": record.get("pool_address"),
+            "pair_class": pair_class, "pair": [sym_x, sym_y],
+            "score": 0.0, "components": {}, "verdict": "CLOSE",
+            "collect_fees": False,
+            "data_quality": {"unknown_components": [], "policy_close": True},
+            "reason": "off-universe pair: policy is stables/high-caps only",
+            "note": "off-universe pair: policy is stables/high-caps only"}
+
+
+def _score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
+                         ctx: dict = None, extra_unknown: list = None) -> dict:
+    """Shared scoring policy. `pos` is either the raw record (local path) or
+    a normalized view built from Missy's features — policy is identical."""
+    cfg = get_config()
     profile = cfg["position_profiles"][pair_class]
     w = profile["weights"]
     components = {}
@@ -908,6 +1048,10 @@ def score_position(pos: dict, pools_by_addr: dict = None, ctx: dict = None) -> d
         floor = max(floor, float(cfg["constants"]["collect_pct_of_value"]) * float(value))
     collect = fees is not None and fees >= floor
 
+    for gap in (extra_unknown or []):
+        if gap not in unknown_parts:
+            unknown_parts.append(gap)
+
     return {"position_id": pos.get("position_id") or pos.get("position_address"),
             "pool": pool_name,
             "pool_address": pos.get("pool_address"),
@@ -977,6 +1121,13 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
     scoring_source = spolicy["source"]
     report["scoring_policy"] = spolicy
     scorer = score_pool_missy if scoring_source == "missy" else score_pool
+    # Position inputs: Missy's feature vector (policy stays Sheldon's) or
+    # local re-derivation from the raw record (kept for backtesting).
+    position_source = spolicy["position_source"]
+    report["position_scoring_policy"] = {
+        "source": position_source,
+        "features_version": spolicy["position_features_version"],
+    }
 
     pools_by_addr = {}
     open_pools = {}
@@ -1008,6 +1159,15 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
                 if s["pair_class"] in ("off_universe", "unknown"):
                     continue
                 s["verdict"] = pool_verdict(s["score"], adaptive_thr)
+                # Missy's discovery gates survive re-tagging: an ineligible
+                # pool never re-opens on an adaptive threshold.
+                _p = s.get("_pool") or {}
+                if s["verdict"] == "OPEN_CANDIDATE" and _p.get("eligible") is False:
+                    s["verdict"] = "IGNORE"
+                    s["reason"] = (f"adaptive: score {s['score']} >= open threshold "
+                                   f"but Missy gate rejected: "
+                                   f"{_p.get('rejected_reason') or 'eligible=false'}")
+                    continue
                 if s["verdict"] == "OPEN_CANDIDATE":
                     s["reason"] = (f"adaptive: score {s['score']} >= open threshold "
                                    f"{adaptive_thr['open']}")
@@ -1040,7 +1200,10 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
                     })
 
     for pos in positions:
-        s = score_position(pos, pools_by_addr, ctx)
+        if position_source == "missy":
+            s = score_position_missy(pos, pools_by_addr, ctx)
+        else:
+            s = score_position(pos, pools_by_addr, ctx)
         report["position_scores"].append(s)
         verdict = s["verdict"]
         if verdict in {"CLOSE", "REVIEW"} and s["pool_address"] in open_pools:
