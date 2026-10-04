@@ -36,6 +36,7 @@ from strategy import (
     capital_plan,
     get_policy,
     meteora_bin_step_allowed,
+    scoring_policy,
 )
 
 # --------------------------------------------------------------------------
@@ -264,6 +265,7 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
         },
         "position_usd": position_usd,
         "score": float(score),
+        "score_policy": scoring_policy(),
         "max_slippage_bps": 100,
         "reason": (
             f"OPEN score={v.get('score')} threshold={min_score} dex={dex} "
@@ -594,6 +596,9 @@ def main() -> int:
     except lp_scoring.ConfigError as exc:
         print(f"CONFIG ERROR: {exc}", file=sys.stderr)
         return 1
+
+    # Versioned scoring identity: which policy produced this cycle's verdicts.
+    report["scoring_policy"] = scoring_policy()
 
     # Build capital plan and strategies from the loaded wallet scan.
     wallet = report.get("wallet") or lp_scoring._empty_wallet("wallet not loaded")

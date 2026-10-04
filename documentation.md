@@ -47,9 +47,48 @@ Sheldon's scoring source is controlled by `sheldon_policy.json`:
   `efficiency_score → turnover`, `risk_score → volatility_fit`.
 - `"local"`: re-run Sheldon's own `score_pool()` from Missy's raw feature
   vector. This path is retained for backtesting and for pools that lack a
-  Missy score.\n
+  Missy score.
+
 When the pool record does not contain `score`, the Missy source falls back
 locally so legacy scans and tests remain valid.
+
+### Scoring-policy audit trail
+
+Every cycle report carries `scoring_policy` (`source`, `version`,
+`min_open_score`), every `pool_scores` entry from the Missy path carries
+`score_policy` (`source`, `version`), and every emitted `open` signal carries
+`score_policy` — so any verdict or signal can be traced to the exact policy
+that produced it. George's `common/rails_loader.py` reads `min_open_score`
+from the same `scoring` block (falling back to the legacy
+`pool_eligibility` path) and exposes `scoring_source` for diagnostics.
+
+### Backtest: scoring source and gate agreement
+
+`backtest.py` replays history through either scorer:
+
+```bash
+python3 backtest.py --scoring-source policy   # follow sheldon_policy.json (default)
+python3 backtest.py --scoring-source missy    # replay with Missy's score
+python3 backtest.py --scoring-source local    # replay with Sheldon's own model
+```
+
+The chosen source is reported as `scoring_source` in the JSON output.
+Compare sources before trusting a rule change: Missy's default score
+distribution is more permissive than Sheldon's local model, so the OPEN rate differs
+materially between sources.
+
+The legacy TVL/volume backstop in `_filter_open_candidates` can only be
+removed after a full verification window. Evidence tool:
+
+```bash
+python3 backtest.py --gate-report [--json]
+```
+
+It walks every historical pool scan and compares Missy's `eligible` flag
+against the legacy gates, counts agreement and both mismatch directions
+(Missy stricter / legacy stricter), histograms Missy reject reasons, and
+prints a backstop verdict: keep while any scan lacks the flag or any pool
+shows `legacy_strict`.
 
 ### Pool LP Opportunity Score
 

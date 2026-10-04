@@ -402,6 +402,26 @@ def classify_pair(record: dict):
 # --------------------------------------------------------------------------
 # Pool LP Opportunity Score
 # --------------------------------------------------------------------------
+def load_scoring_policy() -> dict:
+    """Read the versioned scoring identity from sheldon_policy.json.
+
+    Defaults to local scoring v0 when the manifest is missing or unreadable
+    (fail-open for the identity block only; scoring itself still works).
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "sheldon_policy.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            block = (json.load(fh).get("scoring") or {})
+    except Exception:
+        block = {}
+    return {
+        "source": str(block.get("source", "local")).lower(),
+        "version": int(block.get("version") or 0),
+        "min_open_score": float(block.get("min_open_score") or 70.0),
+    }
+
+
 def _missy_components(pool: dict) -> dict:
     """Map Missy's score_breakdown keys to Sheldon-style component names."""
     breakdown = pool.get("score_breakdown") or {}
@@ -435,6 +455,7 @@ def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
     reasons = []
     if verdict == "OPEN_CANDIDATE":
         reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
+    policy = load_scoring_policy()
     return {
         "pool": pool.get("name"),
         "pool_address": pool.get("pool_address"),
@@ -443,6 +464,7 @@ def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
         "pair": [sym_x, sym_y],
         "score": score,
         "components": components,
+        "score_policy": {"source": policy["source"], "version": policy["version"]},
         "reason": "; ".join(reasons) if reasons else "Missy default score consumed",
         "verdict": verdict,
         "_pool": pool,
@@ -951,14 +973,9 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
         report["dynamic_error"] = traceback.format_exc()
 
     # Determine whether to trust Missy's default score or recompute locally.
-    scoring_source = "local"
-    try:
-        _policy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "sheldon_policy.json")
-        with open(_policy_path, "r", encoding="utf-8") as _fh:
-            scoring_source = str(json.load(_fh).get("scoring", {}).get("source", "local")).lower()
-    except Exception:
-        pass
+    spolicy = load_scoring_policy()
+    scoring_source = spolicy["source"]
+    report["scoring_policy"] = spolicy
     scorer = score_pool_missy if scoring_source == "missy" else score_pool
 
     pools_by_addr = {}

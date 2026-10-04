@@ -39,6 +39,7 @@ def _load_sheldon_policy() -> Dict[str, Any]:
 
     scoring = data.get("scoring") or {}
     policy["scoring_source"] = str(scoring.get("source", "local")).lower()
+    policy["scoring_version"] = int(scoring.get("version") or 1)
     policy["min_open_score"] = float(scoring.get("min_open_score") or 70.0)
 
     pool = data.get("pool_eligibility") or {}
@@ -94,7 +95,17 @@ MAX_POSITION_OPEN_PER_CYCLE: int = _POLICY["max_opens_per_cycle"]
 # burn a cycle (and near-1-bp pools earn nothing worth the round trip).
 ALLOWED_METEORA_BIN_STEPS: Set[int] = _POLICY["allowed_bin_steps"]
 SCORING_SOURCE: str = _POLICY["scoring_source"]
+SCORING_VERSION: int = _POLICY["scoring_version"]
 MIN_OPEN_SCORE: float = _POLICY["min_open_score"]
+
+
+def scoring_policy() -> Dict[str, Any]:
+    """Versioned scoring-policy identity for audit trails and signals."""
+    return {
+        "source": SCORING_SOURCE,
+        "version": SCORING_VERSION,
+        "min_open_score": MIN_OPEN_SCORE,
+    }
 
 # --------------------------------------------------------------------------
 # Volatility-adaptive range constants (centered range)

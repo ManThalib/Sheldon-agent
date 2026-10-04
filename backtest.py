@@ -72,8 +72,10 @@ import random
 import sys
 from datetime import datetime
 
-from lp_scoring import score_pool, score_position, pool_verdict, get_config as lp_get_config
-import dynamic
+from lp_scoring import (score_pool, score_pool_missy, score_position,
+                        pool_verdict, get_config as lp_get_config,
+                        load_scoring_policy)
+import strategy
 
 DEFAULT_DATA_DIR = "/data/missy-data"
 
@@ -83,6 +85,95 @@ DEFAULT_ENTRY_COST_BPS = 50
 DEFAULT_EXIT_COST_BPS = 50
 DEFAULT_CLAIM_COST_USD = 0.02
 DEFAULT_BOOTSTRAP_SAMPLES = 1000
+
+
+def resolve_scorer(args) -> tuple:
+    """Return (scorer_fn, source_name) per --scoring-source / policy."""
+    choice = getattr(args, "scoring_source", "policy")
+    if choice == "policy":
+        choice = load_scoring_policy()["source"]
+    if choice == "missy":
+        return score_pool_missy, "missy"
+    return score_pool, "local"
+
+
+def run_gate_report(pool_paths: list) -> dict:
+    """Compare Missy eligibility flags vs Sheldon's legacy gates over history.
+
+    The legacy backstop in run_cycle._filter_open_candidates can only be
+    dropped once Missy's gates agree with (or strictly supersede) the legacy
+    TVL/volume checks across a full verification window. This report is the
+    evidence for that decision.
+    """
+    policy = strategy.get_policy()
+    min_tvl = float(policy.get("min_pool_liquidity_usd", 25000.0))
+    min_volume = float(policy.get("min_24h_volume_usd", 5000.0))
+
+    total = 0
+    with_flag = 0
+    absent = 0
+    agree = 0
+    missy_strict = 0   # Missy rejects, legacy would pass (Missy is stricter)
+    legacy_strict = 0  # legacy rejects, Missy passes (backstop still needed)
+    reject_reasons = {}
+    mismatch_examples = []
+
+    for path in pool_paths:
+        pools = load_scan(path)
+        if not pools:
+            continue
+        for p in pools:
+            if not isinstance(p, dict) or not p.get("pool_address"):
+                continue
+            total += 1
+            eligible = p.get("eligible")
+            tvl = float(p.get("tvl") or 0.0)
+            volume = float(p.get("volume_window") or p.get("volume") or 0.0)
+            legacy_ok = tvl >= min_tvl and volume >= min_volume
+            if eligible is None:
+                absent += 1
+                continue
+            with_flag += 1
+            if bool(eligible) == legacy_ok:
+                agree += 1
+            elif not eligible and legacy_ok:
+                missy_strict += 1
+                reason = p.get("rejected_reason") or "unknown"
+                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+                if len(mismatch_examples) < 10:
+                    mismatch_examples.append({
+                        "path": os.path.basename(path),
+                        "pool": p.get("name"), "dex": p.get("dex"),
+                        "kind": "missy_strict", "rejected_reason": reason,
+                    })
+            else:
+                legacy_strict += 1
+                if len(mismatch_examples) < 10:
+                    mismatch_examples.append({
+                        "path": os.path.basename(path),
+                        "pool": p.get("name"), "dex": p.get("dex"),
+                        "kind": "legacy_strict",
+                        "tvl": tvl, "volume_window": volume,
+                    })
+
+    flagged_agreement = (agree / with_flag * 100.0) if with_flag else None
+    return {
+        "legacy_gates": {"min_pool_liquidity_usd": min_tvl,
+                         "min_24h_volume_usd": min_volume},
+        "pools_total": total,
+        "scans_with_flag_absent": absent,
+        "pools_with_missy_flag": with_flag,
+        "agreement_count": agree,
+        "agreement_pct_of_flagged": round(flagged_agreement, 2) if flagged_agreement is not None else None,
+        "missy_strict_count": missy_strict,
+        "legacy_strict_count": legacy_strict,
+        "missy_reject_reasons": reject_reasons,
+        "mismatch_examples": mismatch_examples,
+        "backstop_verdict": (
+            "keep backstop" if absent > 0 or legacy_strict > 0
+            else "backstop redundant for this window (Missy flag present and never looser)"
+        ),
+    }
 
 
 def _scan_dt(path: str) -> datetime:
@@ -298,6 +389,7 @@ def backtest_pools(pool_paths: list, args) -> dict:
     cfg = lp_get_config()
     use_dynamic = getattr(args, "dynamic", False)
     dyn_window = int((cfg.get("dynamic") or {}).get("percentile", {}).get("history_scans", 60))
+    scorer, scoring_source = resolve_scorer(args)
 
     scans = []
     prior = []
@@ -315,7 +407,7 @@ def backtest_pools(pool_paths: list, args) -> dict:
         if use_dynamic:
             ctx = dynamic.build_context_from_prior(pools, prior, cfg)
 
-        scored = {addr: score_pool(p, ctx) for addr, p in by_addr.items()}
+        scored = {addr: scorer(p, ctx) for addr, p in by_addr.items()}
 
         # Adaptive pool thresholds require the scored universe.
         if ctx is not None:
@@ -441,6 +533,7 @@ def backtest_pools(pool_paths: list, args) -> dict:
 
     return {
         "scans": len(scans),
+        "scoring_source": scoring_source,
         "completeness_by_scan": [
             {"scan": os.path.basename(s["path"]),
              "pools": len(s["scored"]),
@@ -623,6 +716,11 @@ def main() -> int:
                     help="random seed for bootstrap")
     ap.add_argument("--dynamic", action="store_true",
                     help="use rolling history + adaptive thresholds + regime weights")
+    ap.add_argument("--scoring-source", choices=("policy", "missy", "local"),
+                    default="policy",
+                    help="scorer for replay: policy default, Missy score, or local recompute")
+    ap.add_argument("--gate-report", action="store_true",
+                    help="compare Missy eligibility vs legacy TVL/volume gates, then exit")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--detail", action="store_true",
                     help="print per-candidate rows")
@@ -636,6 +734,28 @@ def main() -> int:
     if not pool_paths:
         print(f"no pool scans under {pools_dir}", file=sys.stderr)
         return 2
+
+    if args.gate_report:
+        report = run_gate_report(pool_paths)
+        if args.json:
+            json.dump(report, sys.stdout, indent=2)
+            print()
+        else:
+            lg = report["legacy_gates"]
+            print(f"Gate agreement report (legacy gates: TVL>={lg['min_pool_liquidity_usd']:.0f}, "
+                  f"volume>={lg['min_24h_volume_usd']:.0f})")
+            print(f"  pools total: {report['pools_total']}")
+            print(f"  Missy flag absent (pre-Phase-1 scans): {report['scans_with_flag_absent']}")
+            print(f"  pools with Missy flag: {report['pools_with_missy_flag']}")
+            print(f"  agreement: {report['agreement_count']} "
+                  f"({report['agreement_pct_of_flagged']}% of flagged)")
+            print(f"  Missy stricter (rejects, legacy passes): {report['missy_strict_count']}")
+            print(f"  legacy stricter (Missy passes): {report['legacy_strict_count']}")
+            for reason, n in sorted(report["missy_reject_reasons"].items(),
+                                    key=lambda kv: -kv[1]):
+                print(f"    reject {n:>4}x  {reason}")
+            print(f"  verdict: {report['backstop_verdict']}")
+        return 0
 
     pools_result = backtest_pools(pool_paths, args)
     pos_result = backtest_positions(pos_paths, pools_dir, args.horizon)

@@ -441,6 +441,21 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(signal["liquidity"]["amount_x"], str(int(25 / 120 * 1e9)))
         self.assertEqual(signal["liquidity"]["amount_y"], str(int(25 / 1 * 1e6)))
 
+    def test_open_signal_carries_score_policy(self):
+        # Audit trail: every open signal records which scoring policy made it.
+        signal = _build_open_signal(self._strategy(), self._verdict(), 1, 12345)
+        sp = signal["score_policy"]
+        self.assertIn(sp["source"], ("missy", "local"))
+        self.assertIsInstance(sp["version"], int)
+        self.assertEqual(float(sp["min_open_score"]), 70.0)
+
+    def test_scoring_policy_identity_loads(self):
+        from strategy import scoring_policy
+        sp = scoring_policy()
+        self.assertEqual(set(sp), {"source", "version", "min_open_score"})
+        self.assertIn(sp["source"], ("missy", "local"))
+        self.assertGreaterEqual(sp["version"], 1)
+
     def test_build_dust_swap_signal(self):
         asset = {
             "mint": "DUST",
