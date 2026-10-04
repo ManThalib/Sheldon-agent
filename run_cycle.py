@@ -109,17 +109,10 @@ def _in_trading_window(windows: dict, action: str) -> bool:
 def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tuple:
     """Drop open candidates that must not become signals.
 
-    Returns (kept, skipped). Skips:
-      - pools already holding a non-closed position (dedup),
-      - duplicate pool addresses (first candidate wins),
-      - candidates whose current tick/bin is unknown (center is None or 0):
-        centering a range when the live price is unknown is how the
-        ZEC/USDC out-of-range re-open happened.
-      - pools outside the configured open window or on a blackout date,
-      - pools that fail the Sheldon policy eligibility gates (TVL, volume),
-      - Meteora pools whose bin_step is not in George's allowed_bin_steps
-        rail (minimum 10): the executor would hard-reject the open, so
-        the candidate is skipped here and explained as a review item.
+    Honors Missy's eligibility flag when present (the default path after
+    Phase 2). For older scans without `eligible`, legacy TVL/volume gates
+    are applied as a backstop. Sheldon-specific rails (bin steps, open
+    score, windows, capital) are always enforced.
     """
     kept = []
     skipped = []
@@ -129,9 +122,9 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
         "close_window_utc": _POLICY.get("close_window_utc"),
         "blackout_dates": _POLICY.get("blackout_dates"),
     }
-    min_liquidity = _POLICY.get("min_pool_liquidity_usd", 250000.0)
-    min_volume = _POLICY.get("min_24h_volume_usd", 1000000.0)
     min_score = _POLICY.get("min_open_score", 70.0)
+    min_liquidity = _POLICY.get("min_pool_liquidity_usd", 25000.0)
+    min_volume = _POLICY.get("min_24h_volume_usd", 5000.0)
 
     if not _in_trading_window(policy_windows, "open"):
         skipped.append({
@@ -160,16 +153,25 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
                             "reason": "current tick/bin unknown; refusing to open blind"})
             continue
 
-        tvl = float(pool.get("tvl") or 0.0)
-        if tvl < min_liquidity:
-            skipped.append({**base,
-                            "reason": f"pool TVL ${tvl:.0f} < policy ${min_liquidity:.0f}"})
+        # Phase 2: trust Missy's eligibility gate when present.
+        eligible = pool.get("eligible")
+        if eligible is False:
+            rejected_reason = pool.get("rejected_reason") or "Missy eligibility: false"
+            skipped.append({**base, "reason": f"Missy: {rejected_reason}"})
             continue
-        volume = float(pool.get("volume_window") or pool.get("volume") or 0.0)
-        if volume < min_volume:
-            skipped.append({**base,
-                            "reason": f"pool volume ${volume:.0f} < policy ${min_volume:.0f}"})
-            continue
+
+        # Legacy backstop for older scans that lack Missy eligibility data.
+        if eligible is None:
+            tvl = float(pool.get("tvl") or 0.0)
+            if tvl < min_liquidity:
+                skipped.append({**base,
+                                "reason": f"pool TVL ${tvl:.0f} < legacy policy ${min_liquidity:.0f}"})
+                continue
+            volume = float(pool.get("volume_window") or pool.get("volume") or 0.0)
+            if volume < min_volume:
+                skipped.append({**base,
+                                "reason": f"pool volume ${volume:.0f} < legacy policy ${min_volume:.0f}"})
+                continue
 
         bin_ok, bin_reason = meteora_bin_step_allowed(pool, dex)
         if not bin_ok:

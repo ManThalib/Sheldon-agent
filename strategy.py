@@ -37,14 +37,16 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["default_max_position_usd"] = float(sizing.get("default_max_position_usd", 100.0))
     policy["max_opens_per_cycle"] = int(sizing.get("max_opens_per_cycle", 20))
 
+    scoring = data.get("scoring") or {}
+    policy["scoring_source"] = str(scoring.get("source", "local")).lower()
+    policy["min_open_score"] = float(scoring.get("min_open_score") or 70.0)
+
     pool = data.get("pool_eligibility") or {}
     policy["allowed_bin_steps"] = set(pool.get("allowed_bin_steps", [10, 20, 25, 50, 100]))
-    policy["min_open_score"] = float(pool.get("min_open_score", 70.0))
+    # Deprecated: the following gates are now owned by Missy. Kept only as
+    # fallback when scanning older Missy outputs that lack `eligible`.
     policy["min_pool_liquidity_usd"] = float(pool.get("min_pool_liquidity_usd", 25000.0))
     policy["min_24h_volume_usd"] = float(pool.get("min_24h_volume_usd", 5000.0))
-    policy["min_fee_tvl_ratio"] = float(pool.get("min_fee_tvl_ratio", 0.05))
-    policy["max_volatility_pct"] = float(pool.get("max_volatility_pct", 50.0))
-    policy["max_turnover_ratio"] = float(pool.get("max_turnover_ratio", 50.0))
 
     windows = data.get("windows") or {}
     policy["open_window_utc"] = windows.get("open_window_utc", "00:00-23:59")
@@ -91,6 +93,8 @@ MAX_POSITION_OPEN_PER_CYCLE: int = _POLICY["max_opens_per_cycle"]
 # signal: George hard-rejects it at the executor, so the open would just
 # burn a cycle (and near-1-bp pools earn nothing worth the round trip).
 ALLOWED_METEORA_BIN_STEPS: Set[int] = _POLICY["allowed_bin_steps"]
+SCORING_SOURCE: str = _POLICY["scoring_source"]
+MIN_OPEN_SCORE: float = _POLICY["min_open_score"]
 
 # --------------------------------------------------------------------------
 # Volatility-adaptive range constants (centered range)

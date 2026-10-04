@@ -27,6 +27,30 @@ symbol triple.
 
 ## Scoring Formulas
 
+### Scoring Source
+
+Sheldon's scoring source is controlled by `sheldon_policy.json`:
+
+```json
+"scoring": {
+  "source": "missy",
+  "min_open_score": 70.0,
+  "version": 1
+}
+```
+
+- `"missy"` (default): consume the `score` and `score_breakdown` emitted by
+  Missy for each pool. The raw score is used directly; verdicts are still
+  computed against the local `pool_thresholds` (and adaptive thresholds when
+  enabled). Component names are mapped from Missy breakdown keys:
+  `yield_score → fee_yield`, `depth_score → depth`,
+  `efficiency_score → turnover`, `risk_score → volatility_fit`.
+- `"local"`: re-run Sheldon's own `score_pool()` from Missy's raw feature
+  vector. This path is retained for backtesting and for pools that lack a
+  Missy score.\n
+When the pool record does not contain `score`, the Missy source falls back
+locally so legacy scans and tests remain valid.
+
 ### Pool LP Opportunity Score
 
 Each component is scored 0-its-weight, then summed to 0-100 (clamped).
@@ -163,7 +187,8 @@ MIN_POSITION_USD`, and a non-`None` `strategy["bin_range"]` from
 
 Open candidates first pass `_filter_open_candidates`: dedup (one position per
 pool), duplicate-pool, `center == 0` refusal, trading window/blackout
-(`_in_trading_window`, Asia/Shanghai), policy TVL/volume/score gates, and the
+(`_in_trading_window`, Asia/Shanghai), Missy eligibility flag (Phase 2;
+legacy TVL/volume backstop only when the flag is absent), and the
 Meteora `allowed_bin_steps` rail. `build_strategies` keeps the top
 `max_opens_per_cycle=3` by score. `plan_funding` + `gate_prep_swaps` then split
 funded strategies (→ open) from shortfalls (→ prep `swap`) and surpluses
@@ -189,8 +214,9 @@ No `SHELDON_IDLE_USDC` env var, no `wallet_balances.json` cache, no RPC lookup.
 
 ## Strategy, Readiness, Grace, Sweep
 
-- `strategy.py`: `get_policy()` (from `sheldon_policy.json`), `suggested_position_usd`
-  (`min(deployable*0.75, max)`), `open_eligible`, `open_eligible` gate, `build_strategies`
+- `strategy.py`: `get_policy()` (from `sheldon_policy.json`; now includes
+  `scoring.source`, `min_open_score`, `allowed_bin_steps`, and deprecated
+  legacy gates), `suggested_position_usd` (`min(deployable*0.75, max)`), `open_eligible`, `open_eligible` gate, `build_strategies`
   (top 3 by score), `adaptive_half_width` (see architecture.md), `_range_center`,
   `meteora_bin_step_allowed` (fail-closed), `capital_plan`. Meteora width capped by
   George `execution_limits.json` `max_meteora_range_width=70`.
@@ -326,8 +352,7 @@ Note: Missy's cron cadence has gaps > 3900 s (e.g. 06:59 → 11:56); raise
 
 Strategy rails live in `sheldon_policy.json` (via `strategy.get_policy()`):
 `min_position_usd` 20, `default_max_position_usd` 100,
-`max_opens_per_cycle` 3, `min_open_score` 70, `min_pool_liquidity_usd` 250k,
-`min_24h_volume_usd` 1M, `allowed_bin_steps` [10,20,25,50,100],
+`max_opens_per_cycle` 3, `min_open_score` 70, `allowed_bin_steps` [10,20,25,50,100],
 `min_fee_tvl_ratio` 0.05, `max_volatility_pct` 50, `max_turnover_ratio` 50,
 `default_max_slippage_bps` 100, windows `00:00-23:59` + `Asia/Shanghai`,
 `add_policy` (enabled, idle_max 20, min_add 5, cooldown 6h, max/day 6,

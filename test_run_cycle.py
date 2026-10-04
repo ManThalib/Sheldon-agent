@@ -128,6 +128,33 @@ class OpenCandidateFilterTests(unittest.TestCase):
         )
         self.assertEqual(kept, [])
 
+    def test_missy_eligible_false_is_skipped(self):
+        candidate = self._candidate(
+            "P1", score=90.0,
+            pool={"eligible": False, "rejected_reason": "tvl below policy"},
+        )
+        kept, skipped = _filter_open_candidates([candidate], {})
+        self.assertEqual(kept, [])
+        self.assertIn("Missy: tvl below policy", skipped[0]["reason"])
+
+    def test_missy_eligible_true_skips_legacy_tvl_volume(self):
+        candidate = self._candidate(
+            "P1", score=90.0,
+            pool={"eligible": True, "tvl": 10.0, "volume_window": 1.0},
+        )
+        kept, skipped = _filter_open_candidates([candidate], {})
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(skipped, [])
+
+    def test_legacy_low_tvl_gate_when_eligible_missing(self):
+        kept, skipped = _filter_open_candidates(
+            [self._candidate("P1", score=90.0,
+                             pool={"tvl": 10.0, "volume_window": 100_000.0})],
+            {},
+        )
+        self.assertEqual(kept, [])
+        self.assertIn("legacy policy", skipped[0]["reason"])
+
     def test_meteora_bin_step_4_is_dropped(self):
         # Incident pool 5rCf1DM8...: bin_step 4 violates George's
         # allowed_bin_steps rail (minimum 10).

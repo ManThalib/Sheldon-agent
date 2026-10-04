@@ -23,6 +23,7 @@ from lp_scoring import (
     load_config,
     run_cycle,
     score_pool,
+    score_pool_missy,
     score_position,
     score_pool_depeg_safety,
     score_pool_depth,
@@ -168,6 +169,48 @@ class PoolScoreTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "OPEN_CANDIDATE")
         self.assertGreaterEqual(result["score"], 70.0)
         self.assertAlmostEqual(sum(result["components"].values()), result["score"], places=2)
+
+    def test_missy_score_consumed_directly(self):
+        pool = {
+            "name": "SOL-USDC", "pool_address": "p1", "dex": "orca",
+            "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+            "score": 85.0,
+            "score_breakdown": {
+                "yield_score": 20.0,
+                "depth_score": 25.0,
+                "efficiency_score": 25.0,
+                "risk_score": 15.0,
+            },
+        }
+        result = score_pool_missy(pool)
+        self.assertEqual(result["score"], 85.0)
+        self.assertEqual(result["verdict"], "OPEN_CANDIDATE")
+        self.assertEqual(result["components"]["fee_yield"], 20.0)
+        self.assertEqual(result["components"]["depth"], 25.0)
+        self.assertEqual(result["pair_class"], "stable_bluechip")
+
+    def test_missy_score_falls_back_when_score_missing(self):
+        pool = {
+            "name": "SOL-USDC", "pool_address": "p1", "dex": "meteora",
+            "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+            "tvl": 2_000_000.0, "volume_window": 20_000_000.0,
+            "realized_fee_apr": 150.0, "volatility": 8.0,
+            "token_x_price_usd": 117.0, "token_y_price_usd": 1.0,
+        }
+        result = score_pool_missy(pool)
+        self.assertGreater(result["score"], 0.0)
+        self.assertIn("verdict", result)
+
+    def test_missy_score_below_open_is_watch(self):
+        pool = {
+            "name": "SOL-USDC", "pool_address": "p1", "dex": "orca",
+            "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+            "score": 60.0,
+            "score_breakdown": {"yield_score": 15, "depth_score": 15,
+                                "efficiency_score": 15, "risk_score": 15},
+        }
+        result = score_pool_missy(pool)
+        self.assertEqual(result["verdict"], "WATCH")
 
     def test_weights_sum_to_100(self):
         for section in ("pool_profiles", "position_profiles"):

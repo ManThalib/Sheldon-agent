@@ -402,6 +402,54 @@ def classify_pair(record: dict):
 # --------------------------------------------------------------------------
 # Pool LP Opportunity Score
 # --------------------------------------------------------------------------
+def _missy_components(pool: dict) -> dict:
+    """Map Missy's score_breakdown keys to Sheldon-style component names."""
+    breakdown = pool.get("score_breakdown") or {}
+    mapping = {
+        "yield_score": "fee_yield",
+        "depth_score": "depth",
+        "efficiency_score": "turnover",
+        "risk_score": "volatility_fit",
+    }
+    out = {}
+    for src, dst in mapping.items():
+        val = breakdown.get(src)
+        if val is not None:
+            out[dst] = float(val)
+    return out
+
+
+def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
+    """Use Missy's default score directly, preserving local verdict thresholds.
+
+    Falls back to Sheldon's local scoring when the pool record does not
+    yet contain a Missy score (legacy scans or tests).
+    """
+    if "score" not in pool:
+        return score_pool(pool, ctx)
+    pair_class, sym_x, sym_y = classify_pair(pool)
+    score = float(pool.get("score") or 0.0)
+    components = _missy_components(pool)
+    thresholds = (ctx or {}).get("thresholds") or get_config()["pool_thresholds"]
+    verdict = pool_verdict(score, thresholds)
+    reasons = []
+    if verdict == "OPEN_CANDIDATE":
+        reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
+    return {
+        "pool": pool.get("name"),
+        "pool_address": pool.get("pool_address"),
+        "dex": pool.get("dex"),
+        "pair_class": pair_class,
+        "pair": [sym_x, sym_y],
+        "score": score,
+        "components": components,
+        "reason": "; ".join(reasons) if reasons else "Missy default score consumed",
+        "verdict": verdict,
+        "_pool": pool,
+        "dynamic": {"regime": None, "thresholds": "static"},
+    }
+
+
 def score_pool_fee_yield(pool: dict, max_pts: float, apr_cap_pct: float) -> float:
     """Realized fee APR only. fee/TVL is intentionally NOT added here: it is
     the same underlying signal as `turnover` (turnover x fee rate), and
@@ -902,11 +950,22 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
         report["failures"].append(f"dynamic context failed: {_exc}")
         report["dynamic_error"] = traceback.format_exc()
 
+    # Determine whether to trust Missy's default score or recompute locally.
+    scoring_source = "local"
+    try:
+        _policy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "sheldon_policy.json")
+        with open(_policy_path, "r", encoding="utf-8") as _fh:
+            scoring_source = str(json.load(_fh).get("scoring", {}).get("source", "local")).lower()
+    except Exception:
+        pass
+    scorer = score_pool_missy if scoring_source == "missy" else score_pool
+
     pools_by_addr = {}
     open_pools = {}
     # First pass: raw scores with regime-adjusted components/blending.
     for pool in pools:
-        s = score_pool(pool, ctx)
+        s = scorer(pool, ctx)
         report["pool_scores"].append(s)
         if pool.get("pool_address"):
             pools_by_addr[pool["pool_address"]] = pool
