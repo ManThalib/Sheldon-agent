@@ -9,7 +9,7 @@ stay in sync.
 import json
 import math
 import os
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 # --------------------------------------------------------------------------
@@ -38,7 +38,7 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["max_opens_per_cycle"] = int(sizing.get("max_opens_per_cycle", 20))
 
     pool = data.get("pool_eligibility") or {}
-    policy["allowed_bin_steps"] = set(pool.get("allowed_bin_steps", [4, 10, 20, 25, 50, 100]))
+    policy["allowed_bin_steps"] = set(pool.get("allowed_bin_steps", [10, 20, 25, 50, 100]))
     policy["min_open_score"] = float(pool.get("min_open_score", 70.0))
     policy["min_pool_liquidity_usd"] = float(pool.get("min_pool_liquidity_usd", 25000.0))
     policy["min_24h_volume_usd"] = float(pool.get("min_24h_volume_usd", 5000.0))
@@ -155,7 +155,7 @@ def meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None) -> tuple:
         return False, "bin_step malformed"
     if bin_step not in ALLOWED_METEORA_BIN_STEPS:
         return False, (
-            f"bin_step {bin_step} < minimum {min(ALLOWED_METEORA_BIN_STEPS)} "
+            f"bin_step {bin_step} not in allowed set {sorted(ALLOWED_METEORA_BIN_STEPS)} "
             "(George rail: allowed_bin_steps)"
         )
     return True, ""
@@ -223,6 +223,9 @@ def build_strategies(open_candidates: List[Dict[str, Any]],
         pool = v.get("_pool") or {}
         center = _range_center(pool, v.get("dex"))
         half_width = adaptive_half_width(pool)
+        if center is None:
+            # Unknown tick/bin: do not emit a range strategy.
+            continue
         lower = center - half_width
         upper = center + half_width
 
@@ -244,20 +247,25 @@ def build_strategies(open_candidates: List[Dict[str, Any]],
     return strategies
 
 
-def _range_center(pool: Dict[str, Any], dex: str) -> int:
+def _range_center(pool: Dict[str, Any], dex: str) -> Optional[int]:
     """Return the pool's current position index.
 
     Meteora uses DLMM bin IDs (``active_bin_id``); Raydium CLMM and Orca
     Whirlpool use ticks. Missy may supply ``current_tick``,
     ``current_tick_index`` or reuse ``active_bin_id`` for the tick value.
+    Returns None when the tick/bin is unknown.
     """
     if dex == "meteora":
-        return int(pool.get("active_bin_id") or 0)
+        val = pool.get("active_bin_id")
+        if val is None:
+            return None
+        return int(val)
     for key in ("current_tick", "current_tick_index", "active_bin_id"):
         val = pool.get(key)
-        if val not in (None, "", 0, "0"):
-            return int(val)
-    return 0
+        if val is None or val in ("", "0"):
+            continue
+        return int(val)
+    return None
 
 
 def capital_plan(wallet: Dict[str, Any]) -> Dict[str, Any]:

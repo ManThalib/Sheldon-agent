@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import lp_scoring
 import range_state
@@ -111,9 +112,9 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
     Returns (kept, skipped). Skips:
       - pools already holding a non-closed position (dedup),
       - duplicate pool addresses (first candidate wins),
-      - candidates whose current tick/bin is unknown (center == 0):
-        centering a range at 0 means the live price is unknown, which is
-        how the ZEC/USDC out-of-range re-open happened.
+      - candidates whose current tick/bin is unknown (center is None or 0):
+        centering a range when the live price is unknown is how the
+        ZEC/USDC out-of-range re-open happened.
       - pools outside the configured open window or on a blackout date,
       - pools that fail the Sheldon policy eligibility gates (TVL, volume),
       - Meteora pools whose bin_step is not in George's allowed_bin_steps
@@ -154,9 +155,9 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
                             "reason": "duplicate pool in scan; first candidate kept"})
             continue
         pool = v.get("_pool") or {}
-        if _range_center(pool, dex) == 0:
+        if _range_center(pool, dex) is None:
             skipped.append({**base,
-                            "reason": "current tick/bin unknown (center=0); refusing to open blind"})
+                            "reason": "current tick/bin unknown; refusing to open blind"})
             continue
 
         tvl = float(pool.get("tvl") or 0.0)
@@ -184,20 +185,25 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict) -> tu
     return kept, skipped
 
 
-def _range_center(pool: dict, dex: str) -> int:
+def _range_center(pool: dict, dex: str) -> Optional[int]:
     """Return the pool's current position index.
 
     Meteora uses DLMM bin IDs (``active_bin_id``); Raydium CLMM and Orca
     Whirlpool use ticks. Missy may supply ``current_tick``,
     ``current_tick_index`` or reuse ``active_bin_id`` for the tick value.
+    Returns None when the tick/bin is unknown.
     """
     if dex == "meteora":
-        return int(pool.get("active_bin_id") or 0)
+        val = pool.get("active_bin_id")
+        if val is None:
+            return None
+        return int(val)
     for key in ("current_tick", "current_tick_index", "active_bin_id"):
         val = pool.get(key)
-        if val not in (None, "", 0, "0"):
-            return int(val)
-    return 0
+        if val is None or val in ("", "0"):
+            continue
+        return int(val)
+    return None
 
 
 def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
@@ -215,6 +221,9 @@ def _build_open_signal(strategy: dict, v: dict, idx: int, base: int) -> dict:
     # the same rail fail-closed, so a signal without it would be rejected.
     score = v.get("score")
     min_score = _POLICY.get("min_open_score", 70.0)
+    center = strategy.get("center")
+    if center is None:
+        return None
     if score is None or float(score) < min_score:
         return None
 
