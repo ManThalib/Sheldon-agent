@@ -7,35 +7,45 @@ positions on **Meteora DLMM**, **Raydium CLMM**, and **Orca Whirlpool**. It
 consists of these modules:
 
 1. **`lp_scoring.py`** — Core scoring engine (config-driven, data-quality aware)
-2. **`dynamic.py`** — Rolling calibration layer: percentiles, regime detection,
-   adaptive thresholds, expected-PnL position verdicts
-3. **`run_cycle.py`** — Cycle runner: loads data, invokes scoring, filters open
-   candidates, builds strategies, plans funding, writes George-schema signals,
-   and logs results
-4. **`strategy.py`** — Position sizing and volatility-adaptive ranges, loaded
-   from `sheldon_policy.json` + George's `execution_limits.json`
-5. **`capital.py`** — Wallet scan loader (`summarize_wallet`: idle USDC, dust,
-   deployable)
-6. **`readiness.py`** — Capital readiness: funding plan + prep-swap gating from
-   the raw wallet scan
+2. **`dynamic/`** — Modular dynamic calibration layer:
+   - `calibration.py` — percentiles, regime detection, adaptive thresholds, expected-PnL verdicts
+   - `helpers.py` — percentile ranking and norms building
+   - `regime.py` — market regime classification and weight adjustment
+   - `thresholds.py` — adaptive pool OPEN/WATCH cut-offs from quantiles
+3. **`run_cycle/`** — Modular cycle runner:
+   - `gates.py` — trading window and open-candidate filtering
+   - `signals.py` — George-signal building and writing
+   - `report.py` — human-readable logs and summaries
+   - `__init__.py` — backward-compatible wrappers matching original `run_cycle.py` API
+4. **`strategy/`** — Position sizing and volatility-adaptive ranges, loaded from
+   `sheldon_policy.json` + George's `execution_limits.json`
+5. **`capital.py`** — Wallet scan loader (`summarize_wallet`: idle USDC, dust, deployable)
+6. **`readiness/`** — Modular capital readiness:
+   - `__init__.py` — package re-exports
+   - `wallet.py` — raw wallet scan loading
+   - `funding.py` — funding plan builder
+   - `prep_swap_gates.py` — swap gating (rescan wait + hourly loop guards)
+   - `prep_swap.py` — build George-schema swap signals
 7. **`range_state.py`** — Out-of-range grace (`state/out_of_range.json`,
    `ALLOWED_OUT_OF_RANGE_RUNS=2`)
 8. **`idle_sweep.py`** — Idle-capital sweep into the best tracked position
    (`add_liquidity`, `state/add_state.json`)
-9. **`profiles.json`** — Externalized scoring configuration (weights,
-   thresholds, constants, dynamic knobs). Missing file → built-in defaults;
-   invalid file → fatal error (fail-closed).
-10. **`sheldon_policy.json`** — Strategy policy (pool eligibility, sizing,
-   windows, slippage, add_policy)
-11. **`backtest.py`** — Historical replay of pool/position verdicts over the
-    Missy scan archive with synthetic PnL + robustness stats (see "Backtesting" below)
-12. **`tuner.py`** — Out-of-sample weight search over historical PnL (writes
-    `profiles.tuned.json`; `--apply` overwrites `profiles.json` with backup)
-13. **`profiles.py` / `models.py`** — Legacy, currently unused (nothing imports
-    them; scoring returns plain dicts)
+9. **`tuner.py`** — Out-of-sample weight search over historical PnL (writes
+   `profiles.tuned.json`, `--apply` with backup)
+10. **`profiles.json`** — Externalized scoring configuration (weights,
+    thresholds, constants, dynamic knobs). Missing file → built-in defaults;
+    invalid file → fatal error (fail-closed).
+11. **`sheldon_policy.json`** — Strategy policy (pool eligibility, sizing,
+    windows, slippage, add_policy)
+12. **`backtest.py`** — Historical replay of pool/position verdicts over the
+    Missy scan archive with synthetic PnL + robustness stats
+13. **`models.py`** — Legacy, currently unused (nothing imports them; scoring
+    returns plain dicts)
+14. **`lp_scoring.py`** — Main entry point, also re-exports key names for backward compatibility
 
-Tests: `test_lp_scoring.py`, `test_dynamic.py`, `test_run_cycle.py`,
-`test_idle_sweep.py`, `test_range_state.py` (stdlib unittest).
+Tests: `python3 -m unittest discover` or individually:
+  `test_lp_scoring.py`, `test_dynamic.py`, `test_run_cycle.py`,
+  `test_idle_sweep.py`, `test_range_state.py` (stdlib unittest).
 
 ## Data Flow
 

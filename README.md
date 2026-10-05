@@ -29,18 +29,36 @@ python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N] \
 ## Modules
 
 - `lp_scoring.py` — core deterministic scoring engine (config-driven, data-quality aware)
-- `run_cycle.py` — cycle runner: scoring, open filtering, strategy building, funding, signals, log
-- `dynamic.py` — rolling calibration, regime detection, and adaptive thresholds
-- `range_state.py` — out-of-range grace: CLOSE/REBALANCE deferred 1 run (`ALLOWED_OUT_OF_RANGE_RUNS=2`, `state/out_of_range.json`)
-- `readiness.py` — capital readiness: funding plan + prep-swap gating from raw wallet scan
-- `capital.py` — wallet scan loader: idle USDC, dust assets (`DUST_MIN_USD=1.0`), deployable capital
-- `strategy.py` — sizing and adaptive ranges from `sheldon_policy.json` + George `execution_limits.json`
-- `idle_sweep.py` — idle-capital sweep: sub-open-floor USDC → `add_liquidity` into best tracked position (`state/add_state.json`)
-- `tuner.py` — out-of-sample weight search over historical PnL (writes `profiles.tuned.json`, `--apply` with backup)
-- `backtest.py` — historical replay of pool/position verdicts with synthetic PnL + walk-forward/bootstrap robustness
-- `profiles.py` / `models.py` — legacy/unused: nothing imports them (scoring returns plain dicts; config lives in `profiles.json` via `lp_scoring.DEFAULT_CONFIG`)
+- `run_cycle/` — modular cycle runner split into focused sub-modules:
+  - `gates.py` — trading window and open-candidate filtering
+  - `signals.py` — George-signal building and writing
+  - `report.py` — human-readable logs and summaries
+- `dynamic/` — modular dynamic calibration:
+  - `__init__.py` — package re-exports
+  - `calibration.py` — context assembly, norms, expected-PnL verdicts
+  - `helpers.py` — percentile ranking and norms building
+  - `regime.py` — market regime classification and weight adjustment
+  - `thresholds.py` — adaptive pool OPEN/WATCH cut-offs from quantiles
+- `readiness/` — modular capital readiness:
+  - `__init__.py` — package re-exports
+  - `wallet.py` — raw wallet scan loading
+  - `funding.py` — funding plan builder
+  - `prep_swap_gates.py` — swap gating (rescan wait + hourly loop guards)
+  - `prep_swap.py` — build George-schema swap signals
+- `backtest/` — historical replay with synthetic PnL:
+  - `__init__.py` — package re-exports
+  - `pool_replay.py` — pool scan replay
+  - `position_replay.py` — position scan replay
+  - `reports.py` — replay reports
+  - `synthetic_pnl.py` — synthetic PnL computation
+- `strategy/` — sizing and adaptive ranges from `sheldon_policy.json`
+- `capital.py` — wallet scan loader: idle USDC, dust assets
+- `range_state.py` — out-of-range grace: CLOSE/REBALANCE deferred 1 run
+- `idle_sweep.py` — idle-capital sweep into best tracked position
+- `tuner.py` — out-of-sample weight search over historical PnL
 - `profiles.json` / `profiles.tuned.json` — scoring profiles and tuned outputs
 - `sheldon_policy.json` — strategy policy: pool eligibility, sizing, windows, slippage, add_policy
+- `models.py` — legacy/unused: nothing imports them (scoring returns plain dicts; config lives in `profiles.json` via `lp_scoring.DEFAULT_CONFIG`)
 
 ## Output
 
