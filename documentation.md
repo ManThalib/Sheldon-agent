@@ -391,7 +391,7 @@ Note: Missy's cron cadence has gaps > 3900 s (e.g. 06:59 → 11:56); raise
 
 Strategy rails live in `sheldon_policy.json` (via `strategy.get_policy()`):
 `min_position_usd` 20, `default_max_position_usd` 100,
-`max_opens_per_cycle` 3, `min_open_score` 70, `allowed_bin_steps` [10,20,25,50,100],
+`max_opens_per_cycle` 3, `min_open_score` 70, `allowed_bin_steps` [4,10,20,25,50,100],
 `min_fee_tvl_ratio` 0.05, `max_volatility_pct` 50, `max_turnover_ratio` 50,
 `default_max_slippage_bps` 100, windows `00:00-23:59` + `Asia/Shanghai`,
 `add_policy` (enabled, idle_max 20, min_add 5, cooldown 6h, max/day 6,

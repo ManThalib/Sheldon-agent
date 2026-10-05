@@ -38,6 +38,7 @@
   "_comment_deprecated": "Missy now owns min_pool_liquidity_usd, min_24h_volume_usd, min_fee_tvl_ratio, max_volatility_pct, max_turnover_ratio. Sheldon keeps allowed_bin_steps, min_open_score, windows, sizing, add/remove policy.",
   "min_open_score": 70.0,
   "allowed_bin_steps": [
+   4,
    10,
    20,
    25,

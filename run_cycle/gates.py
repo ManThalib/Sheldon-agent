@@ -26,6 +26,8 @@ def _meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None) -> Tuple[bo
     pools are always allowed (bins are a DLMM concept). Callers that know
     the dex should pass it — Missy _pool records may lack a dex field.
     """
+    from strategy.sheldon_policy import ALLOWED_METEORA_BIN_STEPS
+
     dex = (dex or pool.get("dex") or "").lower()
     if dex != "meteora":
         return True, ""
@@ -36,7 +38,7 @@ def _meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None) -> Tuple[bo
         bin_step = int(bin_step)
     except (TypeError, ValueError):
         return False, "bin_step malformed"
-    allowed = {10, 20, 25, 50, 100}
+    allowed = ALLOWED_METEORA_BIN_STEPS
     if bin_step not in allowed:
         return False, f"bin_step {bin_step} not in allowed set {sorted(allowed)} (George rail)"
     return True, ""

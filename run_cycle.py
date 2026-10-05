@@ -130,7 +130,7 @@ def main() -> int:
         min_score=_POLICY.get("min_open_score", 70.0),
         min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
         min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
-        allowed_bin_steps=_POLICY.get("allowed_bin_steps", {10, 20, 25, 50, 100}),
+        allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
     )
     report["open_skipped"] = open_skipped
     report["strategies"] = build_strategies(kept_candidates, wallet)
@@ -318,7 +318,7 @@ def main() -> int:
         min_score=_POLICY.get("min_open_score", 70.0),
         min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
         min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
-        allowed_bin_steps=_POLICY.get("allowed_bin_steps", {10, 20, 25, 50, 100}),
+        allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
     )
     report["open_skipped"] = open_skipped
     report["strategies"] = build_strategies(kept_candidates, wallet)

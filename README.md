@@ -129,7 +129,7 @@ modules.
 
 - `position_sizing`: `min_position_usd=20`, `default_max_position_usd=100`, `max_opens_per_cycle=3`
 - `pool_eligibility`: `min_open_score=70`, `min_pool_liquidity_usd=250k`,
-  `min_24h_volume_usd=1M`, `allowed_bin_steps=[10,20,25,50,100]`,
+  `min_24h_volume_usd=1M`, `allowed_bin_steps=[4,10,20,25,50,100]`,
   `min_fee_tvl_ratio=0.05`, `max_volatility_pct=50`, `max_turnover_ratio=50`
 - `windows`: `open_window_utc` / `close_window_utc` (`00:00-23:59`),
   `blackout_dates`, timezone `Asia/Shanghai`

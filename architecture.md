@@ -206,7 +206,7 @@ Where `center` is `active_bin_id` for Meteora, tick for Raydium/Orca
 
 Policy gates live in `sheldon_policy.json` (`strategy.get_policy()`):
 `min_open_score=70`, `min_pool_liquidity_usd=250k`, `min_24h_volume_usd=1M`,
-`allowed_bin_steps=[10,20,25,50,100]`, `min_fee_tvl_ratio=0.05`,
+`allowed_bin_steps=[4,10,20,25,50,100]`, `min_fee_tvl_ratio=0.05`,
 `max_volatility_pct=50`, `max_turnover_ratio=50`, `min_position_usd=20`,
 `default_max_position_usd=100`, `max_opens_per_cycle=3`,
 windows `00:00-23:59` + `Asia/Shanghai`, `default_max_slippage_bps=100`,

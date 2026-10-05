@@ -87,10 +87,10 @@ MIN_POSITION_USD: float = _POLICY["min_position_usd"]
 DEFAULT_MAX_POSITION_USD: float = _POLICY["default_max_position_usd"]
 MAX_POSITION_OPEN_PER_CYCLE: int = _POLICY["max_opens_per_cycle"]
 
-# Mirror of George's SAFETY_RAILS.md `allowed_bin_steps` (minimum 10). A
-# Meteora pool whose bin_step is not in this list must never emit an OPEN
-# signal: George hard-rejects it at the executor, so the open would just
-# burn a cycle (and near-1-bp pools earn nothing worth the round trip).
+# Mirror of George's SAFETY_RAILS.md `allowed_bin_steps`. A Meteora pool
+# whose bin_step is not in this list must never emit an OPEN signal: George
+# hard-rejects it at the executor, so the open would just burn a cycle (and
+# near-1-bp pools earn nothing worth the round trip).
 ALLOWED_METEORA_BIN_STEPS: Set[int] = _POLICY["allowed_bin_steps"]
 
 SCORING_SOURCE: str = _POLICY["scoring_source"]

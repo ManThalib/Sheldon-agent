@@ -155,16 +155,15 @@ class OpenCandidateFilterTests(unittest.TestCase):
         self.assertEqual(kept, [])
         self.assertIn("legacy policy", skipped[0]["reason"])
 
-    def test_meteora_bin_step_4_is_dropped(self):
-        # Incident pool 5rCf1DM8...: bin_step 4 violates George's
-        # allowed_bin_steps rail (minimum 10).
+    def test_meteora_bin_step_125_is_dropped(self):
+        # 125 is not in the allowed_bin_steps whitelist.
         kept, skipped = _filter_open_candidates(
             [self._candidate("P1", dex="meteora",
-                             pool={"active_bin_id": -5333, "bin_step": 4})],
+                             pool={"active_bin_id": -5333, "bin_step": 125})],
             {},
         )
         self.assertEqual(kept, [])
-        self.assertIn("bin_step 4", skipped[0]["reason"])
+        self.assertIn("bin_step 125", skipped[0]["reason"])
 
     def test_meteora_bin_step_10_is_kept(self):
         kept, _ = _filter_open_candidates(
@@ -216,15 +215,15 @@ class OpenCandidateFilterTests(unittest.TestCase):
         verdict = self._candidate("P1", dex="meteora",
                                   pool={"pool_address": "P1",
                                         "active_bin_id": -100,
-                                        "bin_step": 4,
+                                        "bin_step": 125,
                                         "token_x_decimals": 9,
                                         "token_y_decimals": 6,
                                         "token_x_price_usd": 120.0,
                                         "token_y_price_usd": 1.0})
-        # Candidate must pass the filter first; bin_step 4 is dropped.
+        # Candidate must pass the filter first; bin_step 125 is dropped.
         kept, skipped = _filter_open_candidates([verdict], {})
         self.assertEqual(kept, [])
-        self.assertIn("bin_step 4", skipped[0]["reason"])
+        self.assertIn("bin_step 125", skipped[0]["reason"])
 
 
 class WalletCapitalTests(unittest.TestCase):
@@ -588,8 +587,8 @@ class RunCycleIntegrationTests(unittest.TestCase):
             "realized_fee_apr": 150.0, "volatility": 8.0,
             "token_x_price_usd": 117.0, "token_y_price_usd": 1.0,
             "token_x_decimals": 9, "token_y_decimals": 6,
-            # bin_step 10: an allowed step. The 4-step incident pool shape
-            # is covered by test_meteora_bin_step_4_is_dropped above.
+            # bin_step 10: an allowed step. Disallowed bin steps are
+            # covered by test_meteora_bin_step_125_is_dropped above.
             "bin_step": 10, "tick_spacing": 4,
             "active_bin_id": -5299,
         }

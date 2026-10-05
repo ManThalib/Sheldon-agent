@@ -55,7 +55,7 @@ def _filter_open_candidates(
             "blackout_dates": p.get("blackout_dates"),
         }
     if allowed_bin_steps is None:
-        allowed_bin_steps = {10, 20, 25, 50, 100}
+        allowed_bin_steps = {4, 10, 20, 25, 50, 100}
     from run_cycle.gates import _filter_open_candidates as _f
     return _f(
         open_candidates, active_positions,
