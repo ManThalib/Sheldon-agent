@@ -12,10 +12,11 @@ from typing import Any, Dict, List, Optional
 
 
 def newest_wallet_scan(wallet_scans_dir: str, prefix: str = "wallet_screen") -> Optional[str]:
-    """Find the newest wallet scan file in the directory."""
+    """Find the newest wallet scan file in the directory by mtime."""
     paths = sorted(
-        p for p in glob.glob(os.path.join(wallet_scans_dir, prefix + "-*.json"))
-        if not p.endswith((".failed", ".invalid"))
+        (p for p in glob.glob(os.path.join(wallet_scans_dir, prefix + "-*.json"))
+         if not p.endswith((".failed", ".invalid"))),
+        key=lambda p: os.path.getmtime(p),
     )
     return paths[-1] if paths else None
 
