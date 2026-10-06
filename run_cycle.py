@@ -25,10 +25,12 @@ import range_state
 from capital import DUST_MIN_USD
 from idle_sweep import execute_sweep, load_add_state, plan_sweep
 from readiness import (
+    PREP_OSCILLATION_WINDOW_SECONDS,
     build_prep_swap_signal,
     gate_prep_swaps,
     load_raw_wallet,
     plan_funding,
+    prep_ledger,
 )
 from strategy import (
     MIN_POSITION_USD,
@@ -141,17 +143,30 @@ def main() -> int:
     pool_meta = {v.get("pool_address"): (v.get("_pool") or {}) for v in kept_candidates}
     for s in report["strategies"]:
         s.setdefault("_pool", pool_meta.get(s.get("pool_address")) or {})
+    # Anti-oscillation: a mint bought for an open within the last window must
+    # not be round-tripped back to USDC as surplus until that open lands.
+    prep_ledger_state = prep_ledger.load_and_resolve(
+        args.state_dir, prep_ledger.DEFAULT_JOURNAL_DIR,
+    )
+    recent_buy_mints = prep_ledger.recent_buy_mints(
+        prep_ledger_state, now=time.time(), window=PREP_OSCILLATION_WINDOW_SECONDS,
+    )
+
     raw_wallet = load_raw_wallet(args.wallet_scans_dir)
     dust_mints = {a.get("mint") for a in (wallet.get("dust_assets") or []) if a.get("mint")}
     funding = plan_funding(
         report["strategies"], raw_wallet["assets"],
         wallet_path=raw_wallet["path"], wallet_mtime=raw_wallet["mtime"],
         dust_mints=dust_mints,
+        recent_buy_mints=recent_buy_mints,
     )
     if raw_wallet.get("error"):
         funding["notes"].append(f"wallet scan unavailable: {raw_wallet['error']}")
     allowed_preps, blocked_preps = gate_prep_swaps(
-        funding["prep_swaps"], args.signals_dir, funding["wallet_mtime"]
+        funding["prep_swaps"], args.signals_dir, funding["wallet_mtime"],
+        state_dir=args.state_dir,
+        journal_dir=prep_ledger.DEFAULT_JOURNAL_DIR,
+        ledger=prep_ledger_state,
     )
     funding["prep_swaps_allowed"] = allowed_preps
     funding["prep_swaps_blocked"] = blocked_preps
@@ -178,6 +193,7 @@ def main() -> int:
             min_open_score=_POLICY.get("min_open_score", 70.0),
             min_position_usd=_POLICY.get("min_position_usd", 20.0),
             supported_dexes=SUPPORTED_DEXES,
+            state_dir=args.state_dir,
         )
 
         add_state = load_add_state(args.state_dir)

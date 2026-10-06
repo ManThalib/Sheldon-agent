@@ -12,6 +12,8 @@ import os
 import time
 from typing import Any, List, Dict, Optional, Tuple
 
+from . import prep_ledger
+
 # Constants mirror from readiness top-level
 PREP_CONFIRM_GRACE_SECONDS = 60
 MAX_PREP_SWAPS_PER_MINT_PER_HOUR = 3
@@ -63,18 +65,30 @@ def gate_prep_swaps(
     signals_dir: str,
     wallet_mtime: float,
     now: Optional[float] = None,
+    state_dir: Optional[str] = None,
+    journal_dir: Optional[str] = None,
+    ledger: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    """Filter prep swap specs through the rescan-wait and hourly loop guards.
+    """Filter prep swap specs through the state ledger and time-based guards.
 
-    A spec is blocked when the newest prior prep swap for the same mint pair
-    is newer than the wallet scan (rescan has not caught up yet), or when
-    more than MAX_PREP_SWAPS_PER_MINT_PER_HOUR swaps for that pair were
-    emitted in the last hour (loop not converging).
+    The ledger is the authoritative guard: it knows whether an identical prep
+    is still pending, already executed (and when it confirmed), or was
+    rejected. The file-history rescan-wait and hourly cap remain as
+    backstops. With ``state_dir=None`` the ledger is disabled and only the
+    legacy guards run (keeps direct callers/tests working).
     """
     now = now if now is not None else time.time()
     history = _prep_swap_history(signals_dir)
     allowed: List[Dict[str, Any]] = []
     blocked: List[Dict[str, str]] = []
+
+    if state_dir is not None:
+        if ledger is None:
+            ledger = prep_ledger.load_and_resolve(state_dir, journal_dir)
+        ledger_changed = False
+    else:
+        ledger = None
+        ledger_changed = False
 
     scan_age = (now - wallet_mtime) if wallet_mtime else None
     if scan_age is None or scan_age > MAX_WALLET_SCAN_AGE_SECONDS:
@@ -88,6 +102,18 @@ def gate_prep_swaps(
         return allowed, blocked
 
     for spec in prep_specs:
+        if ledger is not None:
+            entry = prep_ledger.newest_entry(ledger, prep_ledger.ledger_key(spec))
+            reason = prep_ledger.suppression_reason(entry, wallet_mtime, now)
+            if entry is not None and entry.get("status") == "expired":
+                ledger_changed = True
+            if reason:
+                blocked.append({
+                    "direction": spec["direction"],
+                    "output_mint": spec["output_mint"],
+                    "reason": reason,
+                })
+                continue
         pair = (spec["input_mint"], spec["output_mint"])
         matches = [h for h in history
                    if (h["input_mint"], h["output_mint"]) == pair and h["created_epoch"] > 0]
@@ -112,4 +138,7 @@ def gate_prep_swaps(
                 })
                 continue
         allowed.append(spec)
+
+    if state_dir is not None and ledger is not None and ledger_changed:
+        prep_ledger.save_ledger(ledger, state_dir)
     return allowed, blocked

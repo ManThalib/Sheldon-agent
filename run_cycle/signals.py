@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 # Import prep swap signal builder from readiness module
 from readiness import build_prep_swap_signal
+from readiness import prep_ledger
 
 
 def _utc_iso():
@@ -118,13 +119,17 @@ def _build_dust_swap_signal(asset: dict, idx: int, base: int) -> dict:
 def write_signals(report: dict, signals_dir: str, positions_dir: str,
                   min_open_score: float = 70.0,
                   min_position_usd: float = 20.0,
-                  supported_dexes: set = None) -> tuple:
+                  supported_dexes: set = None,
+                  state_dir: str = None) -> tuple:
     """Convert verdicts into George-schema signal files.
 
     Returns:
         (created_paths, review_items)
         created_paths: list of files written to George's pending queue.
         review_items: list of items that need human review.
+
+    When ``state_dir`` is set, each emitted prep swap is recorded in the prep
+    ledger so the next cycle can suppress a duplicate by state, not by clock.
     """
     if supported_dexes is None:
         supported_dexes = {"meteora", "raydium", "orca"}
@@ -188,6 +193,8 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
             json.dump(signal, fh, indent=2)
             fh.write("\n")
         created.append(path)
+        if state_dir:
+            prep_ledger.record_emitted(spec, signal["signal_id"], state_dir=state_dir)
         idx += 1
 
     # 1. Dust swap signals (executed before any new positions).

@@ -15,6 +15,7 @@ from .wallet import load_raw_wallet, newest_wallet_scan
 from .funding import plan_funding, _required_amounts
 from .prep_swap_gates import gate_prep_swaps, _prep_swap_history, _created_epoch
 from .prep_swap import build_prep_swap_signal
+from . import prep_ledger
 
 # Backward-compatible re-exports (mirror original readiness.py API)
 load_raw_wallet_func = load_raw_wallet
@@ -33,12 +34,19 @@ BUY_BUFFER_PCT = 2.0
 MIN_PREP_SWAP_USD = 1.0
 SELL_SURPLUS_MIN_USD = 2.0
 
+# Prep ledger (state-based dedupe) constants
+PREP_LEDGER_TTL_SECONDS = prep_ledger.PREP_LEDGER_TTL_SECONDS
+PREP_REJECT_COOLDOWN_SECONDS = prep_ledger.PREP_REJECT_COOLDOWN_SECONDS
+PREP_OSCILLATION_WINDOW_SECONDS = prep_ledger.PREP_OSCILLATION_WINDOW_SECONDS
+DEFAULT_JOURNAL_DIR = prep_ledger.DEFAULT_JOURNAL_DIR
+
 __all__ = [
     "load_raw_wallet",
     "newest_wallet_scan",
     "plan_funding",
     "gate_prep_swaps",
     "build_prep_swap_signal",
+    "prep_ledger",
     "_prep_swap_history",
     "_created_epoch",
     "PREP_CONFIRM_GRACE_SECONDS",
@@ -49,6 +57,10 @@ __all__ = [
     "BUY_BUFFER_PCT",
     "MIN_PREP_SWAP_USD",
     "SELL_SURPLUS_MIN_USD",
+    "PREP_LEDGER_TTL_SECONDS",
+    "PREP_REJECT_COOLDOWN_SECONDS",
+    "PREP_OSCILLATION_WINDOW_SECONDS",
+    "DEFAULT_JOURNAL_DIR",
 ]
 
 

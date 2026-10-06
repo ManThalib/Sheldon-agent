@@ -48,14 +48,20 @@ def plan_funding(
     wallet_path: Optional[str] = None,
     wallet_mtime: float = 0.0,
     dust_mints: Optional[Set[str]] = None,
+    recent_buy_mints: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Score-order funding walk across strategies.
 
     Returns per-strategy funded/unfunded state, prep swap specs for the
     highest-scored unfunded strategy, and surplus sell specs when everything
     selected is funded. Fails safe: no prep swaps without balance data.
+
+    ``recent_buy_mints`` are mints Sheldon bought for an open within the
+    anti-oscillation window; their surplus is held (not sold back to USDC)
+    so a buy is not immediately round-tripped.
     """
     dust_mints = dust_mints or set()
+    recent_buy_mints = recent_buy_mints or set()
 
     # Build asset index by mint.
     assets: Dict[str, Dict[str, Any]] = {}
@@ -188,6 +194,15 @@ def plan_funding(
         # double-handle the same balance.
         dust_mints = dust_mints or set()
         for mint, left in sorted(remaining.items()):
+            # Anti-oscillation: a token bought to fund an open must not be
+            # sold straight back to USDC as "surplus" before that open lands.
+            # Hold it for PREP_OSCILLATION_WINDOW (ledger-derived).
+            if mint in recent_buy_mints:
+                notes.append(
+                    f"anti-oscillation: {mint[:6]} bought recently for an open; "
+                    f"holding surplus (no sell)"
+                )
+                continue
             # SOL is in RESERVED_MINTS (never dust), but its surplus above
             # the reserve is rebalanceable: spendable() already netted the
             # reserve out of `left`. Other reserved mints are owner holds.
