@@ -33,6 +33,7 @@ from readiness import (
     prep_ledger,
 )
 from readiness.prep_ledger import read_journal
+import dynamic
 from strategy import (
     MIN_POSITION_USD,
     build_strategies,
@@ -344,22 +345,54 @@ def main() -> int:
     }
 
     # ----- Rotation detection ------------------------------------------------
-    # After out-of-range grace, check if any position should be rotated
-    # to a better candidate pool. Rotation is considered when the position
-    # verdict is REVIEW, CLOSE, or REBALANCE (post grace).
+    # After out-of-range grace, check if any position should be rotated to a
+    # better candidate pool. Rotation is a two-cycle workflow:
+    #   cycle N:   ROTATE verdict -> close signal for the source position;
+    #              the candidate is reserved and never opened this cycle.
+    #   cycle N+1: the close-settlement gate blocks opens until George's
+    #              journal confirms the close; once the source position is
+    #              gone from the position scan the reservation settles and
+    #              the candidate re-enters the normal open flow.
     # -----------------------------------------------------------------------
     _policy = get_policy()
     rotate_margin = float(_policy.get("rotate_margin", 5.0))
     max_rotations_per_day = int(_policy.get("max_rotations_per_day", 2))
     min_hold_hours = float(_policy.get("min_hold_hours", 12.0))
 
-    # Load rotation state (persists across cycles)
-    rot_state = _load_rotation_state(args.state_dir)
+    # Settle finished rotations: a pending entry whose source position no
+    # longer appears in the position scan is settled (close landed on-chain).
+    # Entries older than 7 days expire, so a lost close can never wedge the
+    # reservation forever.
+    now_ts = time.time()
+    rotations = rot_state.setdefault("rotations", {})
+    for src_addr, entry in list(rotations.items()):
+        if not isinstance(entry, dict):
+            rotations.pop(src_addr, None)
+            continue
+        if entry.get("status") in ("proposed", "awaiting_close"):
+            if src_addr not in active_positions:
+                entry["status"] = "settled"
+                entry["settled_at"] = _utc_iso()
+            else:
+                try:
+                    day_ts = time.mktime(
+                        time.strptime(entry.get("cycle_day") or "", "%Y-%m-%d"))
+                except ValueError:
+                    day_ts = 0.0
+                if day_ts and now_ts - day_ts > 7 * 24 * 3600:
+                    entry["status"] = "expired"
+                    entry["expired_at"] = _utc_iso()
+    pending_targets = {
+        e.get("candidate_pool") for e in rotations.values()
+        if isinstance(e, dict)
+        and e.get("status") in ("proposed", "awaiting_close")
+        and e.get("candidate_pool")
+    }
 
-    # Count rotations today from state
+    # Count rotations today from state (settled ones still count toward the cap)
     rotations_today = len([
-        n for n in rot_state.get("rotations", {}).values()
-        if n.get("cycle_day") == _utc_oday()
+        n for n in rotations.values()
+        if isinstance(n, dict) and n.get("cycle_day") == _utc_oday()
     ])
 
     # Build position -> pool mapping from verdicts
@@ -378,6 +411,10 @@ def main() -> int:
     # Rotate detection: for each position with verdict in {REVIEW, CLOSE, REBALANCE},
     # check if rotating to a candidate pool improves expected PnL.
     rotation_actions = []  # list of (position_index, candidate, pnl_result)
+    pool_scores_by_addr = {
+        ps.get("pool_address"): ps for ps in report.get("pool_scores", [])
+        if ps.get("pool_address")
+    }
     for i, v in enumerate(report.get("verdicts", [])):
         action = v.get("action")
         if action not in ("REVIEW", "CLOSE", "REBALANCE"):
@@ -404,14 +441,6 @@ def main() -> int:
         if best_cand is None:
             continue
 
-        # Get candidate pool data for expected_pnl_verdict
-        cand_pool = best_cand.get("_pool") or {}
-        # Also try to get pool data from the pools scan via pool_address
-        if not cand_pool.get("realized_fee_apr"):
-            # Look up from pools_by_addr (built earlier in the cycle)
-            # We'll use the candidate's own pool data from the verdict
-            pass
-
         # Get position data from report position_scores
         pos_data = None
         for ps in report.get("position_scores", []):
@@ -421,9 +450,36 @@ def main() -> int:
         if pos_data is None:
             continue
 
-        # Call expected_pnl_verdict with candidate pool
+        # Minimum hold period (policy): never rotate a position younger than
+        # min_hold_hours. Unknown age fails safe (no rotation).
+        days_open = pos_data.get("days_open")
+        if days_open is None:
+            continue
+        try:
+            hours_open = float(days_open) * 24.0
+        except (TypeError, ValueError):
+            continue
+        if hours_open < min_hold_hours:
+            continue
+
+        # Per-pool cooldown: at most one rotation per source pool per day,
+        # plus a global daily cap across all pools.
+        last_cycle = (rot_state.get("last_rotation_cycle") or {}).get(addr) or {}
+        if last_cycle.get("day") == _utc_oday():
+            continue
+        if rotations_today >= max_rotations_per_day:
+            continue
+
+        # Pool facts for the PnL comparison: the CURRENT position's pool
+        # drives hold economics; the candidate drives ROTATE economics.
+        # Prefer the verdict's embedded pool record, fall back to the
+        # scored pool entry.
+        src_pool = pos_v.get("_pool") or pool_scores_by_addr.get(addr) or {}
+        cand_pool = best_cand.get("_pool") or pool_scores_by_addr.get(
+            best_cand.get("pool_address")) or {}
+
         pnl = dynamic.expected_pnl_verdict(
-            pos_data, cand_v.get("_pool") or {}, get_config(),
+            pos_data, src_pool, lp_scoring.get_config(),
             candidate_pool=cand_pool,
         )
         if pnl is None or not pnl.get("decisive"):
@@ -431,46 +487,36 @@ def main() -> int:
         if pnl["action"] != "ROTATE":
             continue
 
-        # Check holding period (simplified: skip if too new)
-        days_open = pos_data.get("days_open", 0)
-        # Note: full check uses wall-clock time vs position open time; simplified here.
-
-        # Check cooldown from state
-        if addr in rot_state.get("last_rotation_cycle", {}):
-            last_cycle = rot_state["last_rotation_cycle"][addr]
-            # If rotated in the same day, check daily cap
-            if last_cycle.get("day") == _utc_oday() and \
-               rotations_today >= max_rotations_per_day:
-                continue
-
         rotation_actions.append((i, best_cand, pnl))
 
-    # Apply rotation actions: emit close + reserve target
+    # Apply rotation actions: emit close for the source, reserve the target.
     for pos_idx, cand, pnl in rotation_actions:
         pos_v = report["verdicts"][pos_idx]
         pos_addr = pos_v.get("pool_address")
         cand_addr = cand.get("pool_address")
+        today = _utc_oday()
 
-        # Record rotation in state
-        if pos_addr not in rot_state.get("rotations", {}):
-            rot_state.setdefault("rotations", {})[pos_addr] = {
-                "candidate_pool": cand_addr,
-                "cycle_day": _utc_oday(),
-                "status": "proposed",
-            }
-        else:
-            # Update existing rotation state
-            rot_state["rotations"][pos_addr]["candidate_pool"] = cand_addr
-            rot_state["rotations"][pos_addr]["cycle_day"] = _utc_oday()
-            rot_state["rotations"][pos_addr]["status"] = "proposed"
+        # Record rotation in state (rotations is rot_state["rotations"])
+        rotations[pos_addr] = {
+            "candidate_pool": cand_addr,
+            "cycle_day": today,
+            "status": "awaiting_close",
+        }
+        rot_state.setdefault("last_rotation_cycle", {})[pos_addr] = {
+            "day": today,
+            "candidate_pool": cand_addr,
+        }
+        pending_targets.add(cand_addr)
+        _save_rotation_state(args.state_dir, rot_state)
 
-        range_state.save_range_state(rot_state, args.state_dir)
-
-        # Emit close signal for the position, with rotation reservation
-        # The verdict action becomes "ROTATE" and the reason references the candidate
+        # The verdict becomes ROTATE; write_signals() maps it to a close
+        # signal for the source position. The candidate is NOT opened this
+        # cycle: it is marked reserved here and blocked by the gate, and it
+        # re-enters the open flow only after the close settles.
         pos_v["action"] = "ROTATE"
         pos_v["reason"] = (
-            f"ROTATE: closing {pos_v.get('pool')} -> opening {cand.get('pool')} "
+            f"ROTATE: close {pos_v.get('pool')} ({pos_addr}) -> target "
+            f"{cand.get('pool')} ({cand_addr}) "
             f"(PNL: HOLD={pnl['expected_hold_usd']}, "
             f"ROTATE={pnl['expected_rotate_usd']}, "
             f"margin={pnl['margin_usd']})"
@@ -479,8 +525,12 @@ def main() -> int:
         pos_v["candidate_pool"] = cand.get("pool")
         pos_v["candidate_score"] = cand.get("score")
 
-        # Remove from open candidates (this is a rotation, not a new open)
-        # The candidate will be opened in a later cycle after close confirmation
+        if cand.get("action") == "OPEN_CANDIDATE":
+            cand["action"] = "RESERVED_ROTATION_TARGET"
+            cand["reason"] = (
+                f"reserved as rotation target of {pos_addr}; "
+                f"opens after the source close settles"
+            )
 
     report["verdicts"] = [
         range_state.out_of_range_position_verdict(v, grace_counts)
@@ -525,7 +575,7 @@ def main() -> int:
         min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
         min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
         allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
-        reserved_pools=set(rot_state.get("rotations", {}).keys()),
+        reserved_pools=pending_targets,
     )
     report["open_skipped"] = open_skipped
     report["strategies"] = build_strategies(kept_candidates, wallet)
@@ -579,34 +629,23 @@ def main() -> int:
     report["close_settlement"] = {"allowed": allowed, "reason": reason}
 
     if not allowed:
-        # Block all open signals; mark strategies as blocked
-        report["failures"] = report.get("failures", []) + [
-            f"Close settlement gate blocked open: {reason}"
-        ]
-        # Still build strategies but mark them blocked
+        # Normal rail outcome, not a fatal error: drop every open strategy so
+        # no open signal can be written, hold prep swaps, keep the
+        # close/review flow alive, and surface the block reason.
         kept_candidates = []
-        open_skipped = kept_candidates  # empty
-
-    # If gate allowed, proceed as normal; otherwise kept_candidates is empty
-    if allowed:
-        kept_candidates, open_skipped = _filter_open_candidates(
-            [v for v in report.get("verdicts", [])
-                             if v.get("action") == "OPEN_CANDIDATE"],
-            active_positions,
-            policy_windows={
-                "open_window_utc": _POLICY.get("open_window_utc"),
-                "close_window_utc": _POLICY.get("close_window_utc"),
-                "blackout_dates": _POLICY.get("blackout_dates"),
-            },
-            min_score=_POLICY.get("min_open_score", 70.0),
-            min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
-            min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
-            allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
-            reserved_pools=set(rot_state.get("rotations", {}).keys()),
-        )
-    else:
-        open_skipped = [{"pool_address": None, "dex": "any", "score": None,
-                         "reason": reason}]
+        block_skip = {"pool_address": None, "dex": "any", "score": None,
+                      "reason": f"close settlement gate: {reason}"}
+        open_skipped = (report.get("open_skipped") or []) + [block_skip]
+        report["open_skipped"] = open_skipped
+        report["strategies"] = []
+        for spec in funding.get("prep_swaps_allowed") or []:
+            funding.setdefault("prep_swaps_blocked", []).append({
+                **spec, "reason": "close settlement gate blocks opens",
+            })
+        funding["prep_swaps_allowed"] = []
+        report["notes"] = report.get("notes", []) + [
+            f"Close settlement gate blocked opens: {reason}"
+        ]
 
     if report.get("failures"):
         err = "; ".join(report["failures"])

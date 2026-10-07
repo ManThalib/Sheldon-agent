@@ -300,10 +300,12 @@ SUPPORTED_DEXES = {"meteora", "raydium", "orca"}
 def newest_file(directory: str, prefix: str):
     # Sort by modification time, not filename, so that parallel file families
     # (e.g. wallet_screen vs wallet_screen-mirror1) are selected by freshness.
+    # Ties (identical mtimes, e.g. Missy copying scans) break by newest
+    # filename; the fixed-width timestamp prefix makes that deterministic.
     paths = sorted(
         (p for p in glob.glob(os.path.join(directory, prefix + "-*.json"))
          if not p.endswith((".failed", ".invalid"))),
-        key=lambda p: os.path.getmtime(p),
+        key=lambda p: (os.path.getmtime(p), os.path.basename(p)),
     )
     return paths[-1] if paths else None
 

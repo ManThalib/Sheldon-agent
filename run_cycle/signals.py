@@ -253,7 +253,7 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                     "reason": "OPEN candidate; could not build signal (missing enrichment)",
                 })
                 continue
-        elif action in {"CLOSE", "REBALANCE", "COLLECT_FEES"}:
+        elif action in {"CLOSE", "REBALANCE", "COLLECT_FEES", "ROTATE"}:
             lower = v.get("lower_bound")
             upper = v.get("upper_bound")
             try:
@@ -261,6 +261,17 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 upper = int(upper) if upper is not None else 0
             except (TypeError, ValueError):
                 lower, upper = 0, 0
+            if action == "ROTATE":
+                sig_reason = (
+                    f"ROTATE score={v.get('score')}; "
+                    f"target={v.get('candidate_pool_address')}; "
+                    f"evidence={json.dumps(v.get('evidence'))}"
+                )
+            else:
+                sig_reason = (
+                    f"{action} score={v.get('score')}; "
+                    f"evidence={json.dumps(v.get('evidence'))}"
+                )
             signal = {
                 "signal_id": f"sheldon-{base}-{idx}",
                 "action": "claim_fees" if action == "COLLECT_FEES" else "close",
@@ -272,7 +283,7 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 "bin_range": {"lower": lower, "upper": upper},
                 "liquidity": {"amount_x": "0", "amount_y": "0"},
                 "max_slippage_bps": 100,
-                "reason": f"{action} score={v.get('score')}; evidence={json.dumps(v.get('evidence'))}",
+                "reason": sig_reason,
                 "created_at": _utc_iso(),
             }
         else:

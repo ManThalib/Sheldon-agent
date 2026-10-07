@@ -21,7 +21,7 @@ from strategy.sheldon_policy import (
     scoring_policy,
 )
 from strategy.position_sizing import suggested_position_usd, open_eligible
-from strategy.width._7d_volatility_based import (
+from strategy.range._7d_volatility_based import (
     adaptive_half_width,
     _range_center,
     meteora_bin_step_allowed,

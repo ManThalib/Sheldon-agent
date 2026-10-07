@@ -228,6 +228,7 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
                ("REBALANCE", expected_rebalance)]
 
     # ROTATE: rotate from current position into a candidate pool
+    rotate_value = None
     if candidate_pool is not None:
         cand_apr = float(candidate_pool.get("realized_fee_apr") or 0.0)
         cand_vol = float(candidate_pool.get("volatility") or 0.0)
@@ -236,6 +237,7 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
             # Candidate yield over horizon (projected from pool APR)
             fwd_fees_cand = value_f * (cand_apr / 100.0) * horizon / 365.0
             expected_rotate = fwd_fees_cand - entry_cost - exit_cost - swap_cost - claim_usd
+            rotate_value = expected_rotate
             options.append(("ROTATE", expected_rotate))
 
     ordered = sorted(options, key=lambda kv: kv[1], reverse=True)
@@ -247,7 +249,9 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
         "expected_hold_usd": round(expected_hold, 4),
         "expected_close_usd": round(expected_close, 4),
         "expected_rebalance_usd": round(expected_rebalance, 4),
-        "expected_rotate_usd": round(options[-1][1], 4) if len(options) > 3 else None,
+        "expected_rotate_usd": (
+            round(rotate_value, 4) if rotate_value is not None else None
+        ),
         "margin_usd": round(margin, 4),
         "in_range": in_range,
         "forward_fees_usd": round(fwd_fees, 4),

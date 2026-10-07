@@ -108,8 +108,9 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
     score, windows, capital) are always enforced.
 
     A ``reserved_pools`` set may be provided; pool addresses in this set
-    are exempt from the "already holding a position" dedup check, allowing
-    rotation targets to be selected even when the source position is still open.
+    are rotation targets of pending rotations. Candidates for these pools
+    are skipped (with a review reason) until the source close settles —
+    they re-enter the normal open flow on a later cycle.
 
     Returns (kept, skipped) tuples.
     """
@@ -131,10 +132,16 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
         dex = v.get("dex") or "unknown"
         base = {"pool_address": addr, "dex": dex, "score": v.get("score")}
 
-        # Dedup: already holding or duplicate pool
+        # Dedup: already holding or duplicate pool.
+        # Rotation reservation: pending rotation targets must not open while
+        # the source close is still unsettled.
         is_held = addr in active_positions
         is_reserved = reserved_pools is not None and addr in reserved_pools
-        if is_held and not is_reserved:
+        if is_reserved:
+            skipped.append({**base,
+                            "reason": "reserved as rotation target; source close pending"})
+            continue
+        if is_held:
             skipped.append({**base,
                             "reason": "already holding a position in this pool (dedup)"})
             continue
