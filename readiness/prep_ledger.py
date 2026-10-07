@@ -179,10 +179,18 @@ def read_journal(journal_dir: Optional[str] = None,
                         continue
                     if signal_ids is not None and sid not in signal_ids:
                         continue
-                    decision = rec.get("decision")
-                    if decision not in ("executed", "rejected"):
+                    decision = rec.get("decision") or rec.get("status")
+                    if decision not in ("executed", "rejected", "failed",
+                                        "failed_verify"):
                         continue
-                    amounts = _parse_journal_amounts(rec.get("details") or {})
+                    details = rec.get("details")
+                    reason = rec.get("reason")
+                    if not reason and isinstance(details, dict):
+                        reason = (details.get("error") or details.get("reason")
+                                  or details.get("stage"))
+                    if reason is not None and not isinstance(reason, str):
+                        reason = str(reason)
+                    amounts = _parse_journal_amounts(details or {})
                     # Keep the newest record per signal_id.
                     prev = out.get(sid)
                     ts = _created_epoch(rec.get("timestamp") or "")
@@ -190,6 +198,7 @@ def read_journal(journal_dir: Optional[str] = None,
                         continue
                     out[sid] = {
                         "status": decision,
+                        "reason": reason,
                         "confirmed_at": ts,
                         "in_amount": amounts["in_amount"],
                         "out_amount": amounts["out_amount"],
@@ -259,10 +268,14 @@ def suppression_reason(entry: Optional[Dict[str, Any]], wallet_mtime: float,
                     f"confirmed")
         return None
 
-    if status == "rejected":
+    if status in ("rejected", "failed", "failed_verify"):
+        # A failed/failed_verify journal outcome means George did not execute
+        # the prep either; give it the same cooldown as an explicit rejection
+        # instead of allowing an immediate re-emit.
         resolved = entry.get("confirmed_at") or entry.get("emitted_at") or 0.0
         if now - resolved < PREP_REJECT_COOLDOWN_SECONDS:
-            return (f"prep {sid} rejected {int(now - resolved)}s ago; retry after "
+            label = "rejected" if status == "rejected" else status
+            return (f"prep {sid} {label} {int(now - resolved)}s ago; retry after "
                     f"{int(PREP_REJECT_COOLDOWN_SECONDS)}s cooldown")
         return None
 

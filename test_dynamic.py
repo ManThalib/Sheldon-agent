@@ -111,6 +111,89 @@ class ExpectedPnLTests(unittest.TestCase):
         self.assertIsNone(dynamic.expected_pnl_verdict(pos, pool, self.cfg))
 
 
+class PositionPnlAccountingTests(unittest.TestCase):
+    """CLOSE/ROTATE must credit the fees a close would actually claim, and
+    ROTATE must charge the candidate's projected impermanent loss."""
+
+    def setUp(self):
+        self._orig = lp_scoring.get_config()
+        cfg = json.loads(json.dumps(self._orig))
+        pnl = dict((cfg.get("dynamic") or {}).get("position_pnl") or {})
+        pnl.update({"enabled": True, "horizon_days": 1.0,
+                    "entry_cost_bps": 50.0, "exit_cost_bps": 50.0,
+                    "claim_cost_usd": 0.02, "min_pnl_margin_usd": 0.01})
+        cfg.setdefault("dynamic", {})["position_pnl"] = pnl
+        self.cfg = cfg
+        # Out of range: no forward fees on HOLD, so CLOSE/ROTATE are the
+        # only options that can win.
+        self.pos = {"current_value_usd": 284.61, "days_open": 2.97,
+                    "fees_usd": 5.08, "rewards_usd": 0.5,
+                    "lower_price": 100.0, "upper_price": 120.0,
+                    "current_price": 200.0,
+                    "lower_bound": -50, "upper_bound": 50}
+        self.pool = {"realized_fee_apr": 5.0, "volatility": 30.0}
+        self.cand = {"realized_fee_apr": 120.0, "volatility": 1.5,
+                     "lower_bound": -50, "upper_bound": 50}
+
+    def tearDown(self):
+        lp_scoring.set_config(self._orig)
+
+    def test_close_credits_accrued_claims(self):
+        pnl = dynamic.expected_pnl_verdict(self.pos, self.pool, self.cfg)
+        exit_cost = 284.61 * 50.0 / 10000.0 + 0.02
+        self.assertAlmostEqual(pnl["accrued_claims_usd"], 5.58, places=4)
+        self.assertAlmostEqual(pnl["expected_close_usd"],
+                               round(5.58 - exit_cost, 4), places=4)
+        self.assertEqual(pnl["action"], "CLOSE")
+
+    def test_rotate_credits_claims_and_charges_candidate_il(self):
+        pnl = dynamic.expected_pnl_verdict(self.pos, self.pool, self.cfg,
+                                           candidate_pool=self.cand)
+        self.assertAlmostEqual(pnl["accrued_claims_usd"], 5.58, places=4)
+        self.assertIsNotNone(pnl["il_rotate_usd"])
+        self.assertGreater(pnl["il_rotate_usd"], 0.0)
+        fwd_cand = 284.61 * (120.0 / 100.0) * 1.0 / 365.0
+        # entry + (exit incl. the claim cost) + swap — the claim cost is
+        # charged exactly once, inside exit_cost.
+        costs = (284.61 * 50.0 / 10000.0 * 2
+                 + 284.61 * 100.0 / 10000.0 + 0.02)
+        self.assertAlmostEqual(
+            pnl["expected_rotate_usd"],
+            round(5.58 + fwd_cand - pnl["il_rotate_usd"] - costs, 4), places=4)
+
+    def test_rotate_il_makes_rotation_less_attractive(self):
+        volatile = dict(self.cand, volatility=25.0)
+        pnl = dynamic.expected_pnl_verdict(self.pos, self.pool, self.cfg,
+                                           candidate_pool=volatile)
+        # Without the IL term the volatile candidate would look strictly
+        # better than a quiet one with the same APR.
+        quiet = dynamic.expected_pnl_verdict(
+            self.pos, self.pool, self.cfg,
+            candidate_pool=dict(self.cand, volatility=0.5))
+        self.assertLess(pnl["expected_rotate_usd"],
+                        quiet["expected_rotate_usd"])
+
+    def test_unknown_candidate_volatility_marks_lower_confidence(self):
+        cand = dict(self.cand)
+        cand.pop("volatility")
+        pnl = dynamic.expected_pnl_verdict(self.pos, self.pool, self.cfg,
+                                           candidate_pool=cand)
+        self.assertIsNotNone(pnl)
+        self.assertIsNone(pnl["il_rotate_usd"])
+        self.assertEqual(pnl["rotate_confidence"], "lower")
+        # Current behavior preserved: no invented IL term.
+        self.assertEqual(pnl["expected_rotate_usd"],
+                         round(pnl["expected_rotate_usd"], 4))
+        self.assertIsNotNone(pnl["expected_rotate_usd"])
+
+    def test_hold_option_unchanged_by_claim_credit(self):
+        pnl = dynamic.expected_pnl_verdict(self.pos, self.pool, self.cfg)
+        # HOLD does not claim: forward fees (0 out of range) minus IL only.
+        self.assertEqual(pnl["forward_fees_usd"], 0.0)
+        self.assertAlmostEqual(pnl["expected_hold_usd"],
+                               round(-pnl["il_hold_usd"], 4), places=4)
+
+
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
         self._orig = lp_scoring.get_config()

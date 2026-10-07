@@ -4,6 +4,7 @@
 Run:  python3 test_position_sources.py -v
 """
 
+import json
 import os
 import sys
 import unittest
@@ -255,6 +256,55 @@ class ScorePositionMissyTests(unittest.TestCase):
                 {"Pool1": ss_pool}, None)
         w = lp_scoring.get_config()["position_profiles"]["stable_stable"]["weights"]
         self.assertEqual(s2["components"]["depeg_exposure"], w["depeg_exposure"])
+
+
+class PositionValueAgeFieldTests(unittest.TestCase):
+    """run_cycle's rotation loop needs current_value_usd + days_open in the
+    emitted position_scores (min_hold_hours gate + expected_pnl_verdict)."""
+
+    def setUp(self):
+        self.pools = {"Pool1": dict(POOL)}
+
+    def test_missy_score_carries_value_and_age(self):
+        with patch.object(lp_scoring, "load_scoring_policy",
+                          return_value=dict(_POLICY)):
+            s = score_position_missy(_pos(), self.pools, None)
+        self.assertEqual(s["current_value_usd"], 288.5)
+        self.assertEqual(s["days_open"], 1.41)
+
+    def test_missy_unknown_value_stays_none(self):
+        feats = _features(value_known=False, value_usd=None)
+        with patch.object(lp_scoring, "load_scoring_policy",
+                          return_value=dict(_POLICY)):
+            s = score_position_missy(_pos(features=feats), self.pools, None)
+        self.assertIsNone(s["current_value_usd"])
+
+    def test_local_score_carries_value_and_age(self):
+        pos = {"position_address": "Pos1", "pool_address": "Pool1",
+               "in_range": True, "days_open": 2.97,
+               "current_value_usd": 284.61, "fees_usd": 5.08,
+               "lower_bound": 100, "upper_bound": 200}
+        s = score_position(pos, self.pools, None)
+        self.assertEqual(s["current_value_usd"], 284.61)
+        self.assertEqual(s["days_open"], 2.97)
+
+    def test_run_cycle_position_scores_carry_both(self):
+        import tempfile
+        import shutil
+        tmp = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp, "pool_scan-t.json"), "w") as fh:
+                json.dump([dict(POOL)], fh)
+            with open(os.path.join(tmp, "position_scan-t.json"), "w") as fh:
+                json.dump({"positions": [_pos()]}, fh)
+            with patch.object(lp_scoring, "load_scoring_policy",
+                              return_value=dict(_POLICY)):
+                report = lp_scoring.run_cycle(tmp, tmp, None)
+            ps = report["position_scores"][0]
+            self.assertEqual(ps["current_value_usd"], 288.5)
+            self.assertEqual(ps["days_open"], 1.41)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class LocalIdentityTests(unittest.TestCase):

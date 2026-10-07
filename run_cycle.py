@@ -46,6 +46,10 @@ from strategy import (
 from run_cycle.gates import _in_trading_window, _filter_open_candidates, _range_center
 from run_cycle.signals import write_signals
 from run_cycle.report import append_log, _short_summary, _wake_george
+from run_cycle.rotation import (
+    _release_unemitted_rotations,
+    _settle_rotations,
+)
 
 # --------------------------------------------------------------------------
 # Policy values loaded from sheldon_policy.json (single source).
@@ -365,29 +369,18 @@ def main() -> int:
     # reservation forever.
     now_ts = time.time()
     rotations = rot_state.setdefault("rotations", {})
-    for src_addr, entry in list(rotations.items()):
-        if not isinstance(entry, dict):
-            rotations.pop(src_addr, None)
-            continue
-        if entry.get("status") in ("proposed", "awaiting_close"):
-            if src_addr not in active_positions:
-                entry["status"] = "settled"
-                entry["settled_at"] = _utc_iso()
-            else:
-                try:
-                    day_ts = time.mktime(
-                        time.strptime(entry.get("cycle_day") or "", "%Y-%m-%d"))
-                except ValueError:
-                    day_ts = 0.0
-                if day_ts and now_ts - day_ts > 7 * 24 * 3600:
-                    entry["status"] = "expired"
-                    entry["expired_at"] = _utc_iso()
+    close_resolutions = read_journal(prep_ledger.DEFAULT_JOURNAL_DIR)
+    rotation_review = _settle_rotations(
+        rotations, active_positions, close_resolutions, now_ts=now_ts)
     pending_targets = {
         e.get("candidate_pool") for e in rotations.values()
         if isinstance(e, dict)
         and e.get("status") in ("proposed", "awaiting_close")
         and e.get("candidate_pool")
     }
+
+    report["rotations"] = rotations
+    report["rotation_review"] = rotation_review
 
     # Count rotations today from state (settled ones still count toward the cap)
     rotations_today = len([
@@ -656,20 +649,34 @@ def main() -> int:
         return 2
 
     signals_created = []
-    review = []
+    review = list(rotation_review)
     if args.write_signals:
         # Approved design: open signals are written FIRST, then the
         # idle-capital sweep reads the queue (pending opens/prep swaps are
         # committed capital) and sweeps only the leftover below the open
         # floor into the best tracked position. A failure here degrades to
         # the old behavior (no sweep), never blocks opens.
-        signals_created, review = write_signals(
+        signals_created, signal_review = write_signals(
             report, args.signals_dir, args.positions_dir,
             min_open_score=_POLICY.get("min_open_score", 70.0),
             min_position_usd=_POLICY.get("min_position_usd", 20.0),
             supported_dexes=SUPPORTED_DEXES,
             state_dir=args.state_dir,
         )
+
+        review.extend(signal_review)
+        for path in signals_created:
+            with open(path, encoding="utf-8") as fh:
+                emitted = json.load(fh)
+            entry = rotations.get(emitted.get("pool_address"))
+            if (entry and entry.get("status") == "awaiting_close"
+                    and emitted.get("action") == "close"):
+                entry["close_signal_id"] = emitted["signal_id"]
+        unemitted = _release_unemitted_rotations(
+            rotations, cycle_day=_utc_oday())
+        rotation_review.extend(unemitted)
+        review.extend(unemitted)
+        _save_rotation_state(args.state_dir, rot_state)
 
         add_state = load_add_state(args.state_dir)
         sweep_signal, sweep_info = plan_sweep(

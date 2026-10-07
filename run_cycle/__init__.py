@@ -16,6 +16,10 @@ from run_cycle.signals import (
     _build_dust_swap_signal as _build_dust_swap_signal_impl,
     write_signals as write_signals_impl,
 )
+from run_cycle.rotation import (
+    _release_unemitted_rotations,
+    _settle_rotations,
+)
 from run_cycle.report import (
     append_log as append_log_impl,
     _short_summary as _short_summary_impl,

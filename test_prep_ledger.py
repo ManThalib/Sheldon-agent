@@ -167,6 +167,52 @@ class LedgerUnitTests(unittest.TestCase):
         self.assertEqual(led["entries"][0]["status"], "rejected")
 
 
+    def test_read_journal_surfaces_failed_close(self):
+        journal_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, journal_dir, ignore_errors=True)
+        rec = {"timestamp": iso(1020.0), "signal_id": "sheldon-rot-1-1",
+               "action": "close", "decision": "failed",
+               "details": {"stage": "send", "error": "blockhash expired"}}
+        with open(os.path.join(journal_dir, "2026-10-05.jsonl"), "w") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        out = prep_ledger.read_journal(journal_dir)
+        self.assertEqual(out["sheldon-rot-1-1"]["status"], "failed")
+        self.assertIn("blockhash expired", out["sheldon-rot-1-1"]["reason"])
+        self.assertAlmostEqual(out["sheldon-rot-1-1"]["confirmed_at"], 1020.0)
+
+    def test_read_journal_keeps_newest_decision_per_signal(self):
+        journal_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, journal_dir, ignore_errors=True)
+        path = os.path.join(journal_dir, "2026-10-05.jsonl")
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"timestamp": iso(1000.0),
+                                 "signal_id": "sheldon-rot-2-1",
+                                 "decision": "failed"}) + "\n")
+            fh.write(json.dumps({"timestamp": iso(1100.0),
+                                 "signal_id": "sheldon-rot-2-1",
+                                 "decision": "executed"}) + "\n")
+        out = prep_ledger.read_journal(journal_dir)
+        self.assertEqual(out["sheldon-rot-2-1"]["status"], "executed")
+
+    def test_failed_prep_cools_down_like_rejection(self):
+        now = time.time()
+        prep_ledger.record_emitted(buy_spec(), "sheldon-prep-9-3",
+                                   state_dir=self.state_dir, now=1000.0)
+        journal_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, journal_dir, ignore_errors=True)
+        with open(os.path.join(journal_dir, "2026-10-05.jsonl"), "w") as fh:
+            fh.write(json.dumps({"timestamp": iso(now - 10.0),
+                                 "signal_id": "sheldon-prep-9-3",
+                                 "decision": "failed",
+                                 "details": {"error": "rpc timeout"}}) + "\n")
+        led = prep_ledger.load_and_resolve(self.state_dir, journal_dir)
+        self.assertEqual(led["entries"][0]["status"], "failed")
+        reason = prep_ledger.suppression_reason(led["entries"][0],
+                                                wallet_mtime=now - 5, now=now)
+        self.assertIsNotNone(reason)
+        self.assertIn("failed", reason)
+
+
 class GateLedgerTests(unittest.TestCase):
     """gate_prep_swaps with the ledger enabled (state_dir set)."""
 

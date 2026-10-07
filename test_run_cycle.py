@@ -33,6 +33,114 @@ from strategy import (
 )
 from run_cycle import _build_dust_swap_signal, _build_open_signal
 from run_cycle import _filter_open_candidates, _load_active_positions
+from run_cycle import _release_unemitted_rotations, _settle_rotations
+
+
+class RotationSettlementTests(unittest.TestCase):
+    """Item 3: a rejected/failed rotation close must fail the entry and
+    release the candidate reservation instead of wedging it for 7 days."""
+
+    DAY = "2026-10-07"
+    NOW = 1791400000.0  # 2026-10-07-ish epoch; only relative math matters
+
+    def _rotations(self, status="awaiting_close",
+                   sid="sheldon-rot-1-1"):
+        return {"SRC": {"candidate_pool": "CAND", "cycle_day": self.DAY,
+                        "status": status, "close_signal_id": sid}}
+
+    def _reserved(self, rotations):
+        return {e.get("candidate_pool") for e in rotations.values()
+                if isinstance(e, dict)
+                and e.get("status") in ("proposed", "awaiting_close")
+                and e.get("candidate_pool")}
+
+    def test_rejected_close_fails_entry_and_releases_reservation(self):
+        rotations = self._rotations()
+        review = _settle_rotations(
+            rotations, {"SRC": {"pool_address": "SRC"}},
+            {"sheldon-rot-1-1": {"status": "rejected",
+                                 "reason": "simulation failed",
+                                 "confirmed_at": self.NOW - 10}},
+            now_ts=self.NOW)
+        entry = rotations["SRC"]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("rejected", entry["reason"])
+        self.assertIn("simulation failed", entry["reason"])
+        self.assertTrue(entry.get("failed_at"))
+        self.assertEqual([r["pool_address"] for r in review], ["SRC"])
+        self.assertEqual(review[0]["reason"], entry["reason"])
+        self.assertNotIn("CAND", self._reserved(rotations))
+
+    def test_failed_and_failed_verify_also_fail_entry(self):
+        for status in ("failed", "failed_verify"):
+            rotations = self._rotations(sid="sheldon-rot-2-1")
+            review = _settle_rotations(
+                rotations, {"SRC": {"pool_address": "SRC"}},
+                {"sheldon-rot-2-1": {"status": status, "reason": "rpc down",
+                                     "confirmed_at": self.NOW}},
+                now_ts=self.NOW)
+            self.assertEqual(rotations["SRC"]["status"], "failed", status)
+            self.assertEqual(len(review), 1)
+
+    def test_executed_close_keeps_awaiting_close(self):
+        rotations = self._rotations(sid="sheldon-rot-3-1")
+        review = _settle_rotations(
+            rotations, {"SRC": {"pool_address": "SRC"}},
+            {"sheldon-rot-3-1": {"status": "executed",
+                                 "confirmed_at": self.NOW}},
+            now_ts=self.NOW)
+        self.assertEqual(rotations["SRC"]["status"], "awaiting_close")
+        self.assertEqual(review, [])
+        self.assertIn("CAND", self._reserved(rotations))
+
+    def test_settlement_wins_when_source_position_gone(self):
+        # George's close landed (source left the scan): settle, even if an
+        # older journal line said rejected.
+        rotations = self._rotations(sid="sheldon-rot-4-1")
+        review = _settle_rotations(
+            rotations, {},
+            {"sheldon-rot-4-1": {"status": "rejected",
+                                 "confirmed_at": self.NOW}},
+            now_ts=self.NOW)
+        self.assertEqual(rotations["SRC"]["status"], "settled")
+        self.assertEqual(review, [])
+
+    def test_stale_pending_entry_expires(self):
+        rotations = self._rotations(sid="sheldon-rot-5-1")
+        _settle_rotations(rotations, {"SRC": {"pool_address": "SRC"}}, {},
+                          now_ts=self.NOW + 8 * 24 * 3600)
+        self.assertEqual(rotations["SRC"]["status"], "expired")
+
+    def test_unemitted_close_signal_releases_reservation(self):
+        rotations = {"SRC": {"candidate_pool": "CAND", "cycle_day": self.DAY,
+                             "status": "awaiting_close"},
+                     "OLD": {"candidate_pool": "OLD_CAND",
+                             "cycle_day": "2026-10-01",
+                             "status": "awaiting_close",
+                             "close_signal_id": "sheldon-old-1"}}
+        review = _release_unemitted_rotations(rotations, cycle_day=self.DAY)
+        self.assertEqual(rotations["SRC"]["status"], "failed")
+        self.assertEqual([r["pool_address"] for r in review], ["SRC"])
+        # An entry from an earlier cycle with a recorded signal is untouched.
+        self.assertEqual(rotations["OLD"]["status"], "awaiting_close")
+
+    def test_unemitted_release_ignores_recorded_signal(self):
+        rotations = {"SRC": {"candidate_pool": "CAND", "cycle_day": self.DAY,
+                             "status": "awaiting_close",
+                             "close_signal_id": "sheldon-rot-9-1"}}
+        self.assertEqual(
+            _release_unemitted_rotations(rotations, cycle_day=self.DAY), [])
+        self.assertEqual(rotations["SRC"]["status"], "awaiting_close")
+
+    def test_unknown_close_signal_id_is_not_failed(self):
+        rotations = {"SRC": {"candidate_pool": "CAND", "cycle_day": self.DAY,
+                             "status": "awaiting_close"}}
+        review = _settle_rotations(
+            rotations, {"SRC": {"pool_address": "SRC"}},
+            {"other-signal": {"status": "rejected", "confirmed_at": self.NOW}},
+            now_ts=self.NOW)
+        self.assertEqual(rotations["SRC"]["status"], "awaiting_close")
+        self.assertEqual(review, [])
 
 
 class OpenCandidateFilterTests(unittest.TestCase):

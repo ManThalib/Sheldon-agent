@@ -175,7 +175,7 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
     enough to override the score-based verdict.
 
     If ``candidate_pool`` is provided, a fourth ``ROTATE`` option is computed
-    as:  C_yield - entry_cost - exit_cost - swap_cost - claim_cost
+    as: accrued claims + C_yield - candidate IL - entry/exit/swap costs
     where C_yield is the candidate pool's fee yield projected over the horizon.
     """
 
@@ -220,7 +220,9 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
     swap_cost = value * max_slippage_bps / 10000.0
 
     expected_hold = fwd_fees - il_hold
-    expected_close = -exit_cost
+    accrued_claims = float(pos.get("fees_usd") or 0.0) + float(
+        pos.get("rewards_usd") or 0.0)
+    expected_close = accrued_claims - exit_cost
     expected_rebalance = fwd_fees - exit_cost - entry_cost
 
     options = [("HOLD", expected_hold),
@@ -229,14 +231,28 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
 
     # ROTATE: rotate from current position into a candidate pool
     rotate_value = None
+    il_rotate = None
+    rotate_confidence = None
     if candidate_pool is not None:
         cand_apr = float(candidate_pool.get("realized_fee_apr") or 0.0)
-        cand_vol = float(candidate_pool.get("volatility") or 0.0)
-        if cand_apr > 0 and cand_vol > 0 and value > 0:
+        if cand_apr > 0 and value > 0:
             value_f = float(value)
             # Candidate yield over horizon (projected from pool APR)
             fwd_fees_cand = value_f * (cand_apr / 100.0) * horizon / 365.0
-            expected_rotate = fwd_fees_cand - entry_cost - exit_cost - swap_cost - claim_usd
+            # A fresh candidate has no reported historical IL. Use its own
+            # proposed bounds; unknown width is conservatively concentrated.
+            from lp_scoring import estimate_il_pct
+            candidate_range = {
+                "lower_bound": candidate_pool.get("lower_bound"),
+                "upper_bound": candidate_pool.get("upper_bound"),
+            }
+            il_pct, il_source = estimate_il_pct(
+                candidate_range, candidate_pool, horizon)
+            il_rotate = value_f * il_pct / 100.0 if il_pct is not None else None
+            rotate_confidence = "lower" if il_source == "unknown" else "estimated"
+            expected_rotate = (accrued_claims + fwd_fees_cand
+                               - (il_rotate or 0.0) - entry_cost
+                               - exit_cost - swap_cost)
             rotate_value = expected_rotate
             options.append(("ROTATE", expected_rotate))
 
@@ -252,6 +268,9 @@ def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[s
         "expected_rotate_usd": (
             round(rotate_value, 4) if rotate_value is not None else None
         ),
+        "accrued_claims_usd": round(accrued_claims, 4),
+        "il_rotate_usd": round(il_rotate, 4) if il_rotate is not None else None,
+        "rotate_confidence": rotate_confidence,
         "margin_usd": round(margin, 4),
         "in_range": in_range,
         "forward_fees_usd": round(fwd_fees, 4),
