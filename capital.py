@@ -82,5 +82,6 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
         "dust_assets": dust_assets,
         "reserved_total_usdc": reserved_total,
         "deployable_usdc": idle_usdc + dust_total,
+        "pending_release_usdc": 0.0,
         "errors": [],
     }

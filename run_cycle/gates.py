@@ -99,13 +99,17 @@ def _range_center(pool: dict, dex: str):
 def _filter_open_candidates(open_candidates: list, active_positions: dict,
                             policy_windows: dict, min_score: float,
                             min_liquidity: float, min_volume: float,
-                            allowed_bin_steps: set) -> tuple:
+                            allowed_bin_steps: set, reserved_pools: set = None) -> tuple:
     """Drop open candidates that must not become signals.
 
     Honors Missy's eligibility flag when present (the default path after
     Phase 2). For older scans without `eligible`, legacy TVL/volume gates
     are applied as a backstop. Sheldon-specific rails (bin steps, open
     score, windows, capital) are always enforced.
+
+    A ``reserved_pools`` set may be provided; pool addresses in this set
+    are exempt from the "already holding a position" dedup check, allowing
+    rotation targets to be selected even when the source position is still open.
 
     Returns (kept, skipped) tuples.
     """
@@ -128,7 +132,9 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
         base = {"pool_address": addr, "dex": dex, "score": v.get("score")}
 
         # Dedup: already holding or duplicate pool
-        if addr in active_positions:
+        is_held = addr in active_positions
+        is_reserved = reserved_pools is not None and addr in reserved_pools
+        if is_held and not is_reserved:
             skipped.append({**base,
                             "reason": "already holding a position in this pool (dedup)"})
             continue

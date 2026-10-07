@@ -130,6 +130,36 @@ def _wake_george(signals_created: list, review: list):
 _build_open_signal = _build_open_signal
 _build_dust_swap_signal = _build_dust_swap_signal
 
+# Rotation state management (persists across cycles for rotation detection)
+import json
+import os
+
+def _load_rotation_state(state_dir: str) -> dict:
+    """Load rotation state from JSON file, persist across cycles."""
+    path = os.path.join(state_dir, "rotation_state.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {"rotations": {}, "last_rotation_cycle": {}}
+
+
+def _save_rotation_state(state_dir: str, state: dict) -> None:
+    """Persist rotation state atomically."""
+    path = os.path.join(state_dir, "rotation_state.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
 __all__ = [
     "_in_trading_window",
     "_filter_open_candidates",
@@ -140,4 +170,6 @@ __all__ = [
     "append_log",
     "_short_summary",
     "_wake_george",
+    "_load_rotation_state",
+    "_save_rotation_state",
 ]

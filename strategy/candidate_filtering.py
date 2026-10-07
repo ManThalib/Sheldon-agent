@@ -12,7 +12,7 @@ Dependencies (all from strategy package):
 from typing import Any, List, Dict
 from strategy.sheldon_policy import MAX_POSITION_OPEN_PER_CYCLE
 from strategy.position_sizing import open_eligible, suggested_position_usd
-from strategy.range import _range_center, adaptive_half_width
+from strategy.width._7d_volatility_based import _range_center, adaptive_half_width
 
 
 def build_strategies(open_candidates: List[Dict[str, Any]],

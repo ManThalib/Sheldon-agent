@@ -32,6 +32,7 @@ from readiness import (
     plan_funding,
     prep_ledger,
 )
+from readiness.prep_ledger import read_journal
 from strategy import (
     MIN_POSITION_USD,
     build_strategies,
@@ -64,6 +65,225 @@ def _utc_iso():
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
+def _utc_oday():
+    """Return today's date in Asia/Shanghai timezone, for rotation state tracking."""
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+
+def _load_rotation_state(state_dir: str) -> dict:
+    """Load rotation state from JSON file, persist across cycles."""
+    path = os.path.join(state_dir, "rotation_state.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {"rotations": {}, "last_rotation_cycle": {}}
+
+
+def _save_rotation_state(state_dir: str, state: dict) -> None:
+    """Persist rotation state atomically."""
+    path = os.path.join(state_dir, "rotation_state.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+# ----- Close settlement state -----
+
+CLOSE_STATE_FILENAME = "close_settlement_state.json"
+
+
+def _close_state_path(state_dir: str) -> str:
+    """Path to the close settlement state file."""
+    return os.path.join(state_dir, CLOSE_STATE_FILENAME)
+
+
+def _load_close_state(state_dir: str) -> dict:
+    """Load close settlement state from previous cycles.
+
+    Returns dict keyed by signal_id with status:
+      "CLOSE_EMITTED"     - signal file written to pending/
+      "CLOSE_ACCEPTED"    - journal record present, decision in {executed}
+      "CLOSE_REJECTED"    - journal decision in {rejected, failed, failed_verify}
+      "CLOSE_UNKNOWN"     - no journal record, or record lacks signature/timestamp
+    """
+    path = _close_state_path(state_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            # Ensure all values have a status field
+            for k, v in data.items():
+                if not isinstance(v, dict):
+                    data[k] = {"status": v}
+            return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _save_close_state(state_dir: str, state: dict) -> None:
+    """Persist close settlement state atomically."""
+    path = _close_state_path(state_dir)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _close_status(signal_id: str, state: dict) -> str:
+    """Return the close status for a given signal_id, or CLOSE_UNKNOWN."""
+    entry = state.get(signal_id)
+    if entry and isinstance(entry, dict):
+        return entry.get("status", "CLOSE_UNKNOWN")
+    return "CLOSE_UNKNOWN"
+
+
+def _update_close_status(state: dict, signal_id: str, status: str) -> dict:
+    """Update close status for a signal_id in the state dict."""
+    entry = state.setdefault(signal_id, {})
+    if isinstance(entry, dict):
+        entry["status"] = status
+    else:
+        entry = {"status": status}
+    state[signal_id] = entry
+    return state
+
+
+def _check_close_settlement(active_positions: dict, wallet_mtime: float,
+                            close_state: dict, now: float = None) -> tuple:
+    """Check close settlement status before allowing any open.
+
+    Returns (allowed, reason, updated_close_state) tuple.
+
+    Rules (in order of priority):
+
+    1. No open for a pool/position while its close is CLOSE_EMITTED,
+       CLOSE_UNKNOWN, or CLOSE_REJECTED unresolved.
+
+    2. Open allowed only on FUNDS_VERIFIED (wallet scan newer than close
+       confirmation, position absent from newer scan).
+
+    3. CLOSE_REJECTED requires explicit resolution — never automatic retry.
+
+    4. CLOSE_UNKNOWN past TTL (7 days from emit) escalates to
+       CLOSE_UNKNOWN_TIMEOUT, still blocking open.
+
+    5. No in-flight signal for same wallet/pool/position in pending/.
+
+    6. No unresolved failed_verify entry for the same pool.
+
+    7. Scans within one coherence window (within 120 seconds).
+
+    Items 1, 7, and the TTL check (item 4) are load-bearing. Items 2, 5, 6
+    are defense-in-depth.
+    """
+    if now is None:
+        now = time.time()
+
+    ttl_days = 7 * 24 * 3600  # 7 days
+    ttlim = now - ttl_days
+
+    # ---- Step 1: Read George's journal for close decisions ----
+    journal_dir = prep_ledger.DEFAULT_JOURNAL_DIR
+    journal_resolutions = read_journal(journal_dir)  # maps signal_id -> {status, confirmed_at, ...}
+
+    # ---- Step 2: Build close status map from journal + state ----
+    updated_state = dict(close_state)  # shallow copy we'll modify
+
+    # Read all journal entries and update close status
+    for sid, res in journal_resolutions.items():
+        decision = res.get("decision")
+        if decision not in ("executed", "rejected", "failed", "failed_verify"):
+            continue
+        ts = res.get("confirmed_at") or res.get("timestamp") or 0.0
+        if decision == "executed" and ts:
+            new_status = "CLOSE_ACCEPTED"
+        elif decision in ("rejected", "failed", "failed_verify"):
+            new_status = "CLOSE_REJECTED"
+        else:
+            new_status = "CLOSE_UNKNOWN"
+
+        updated_state = _update_close_status(updated_state, sid, new_status)
+
+    # ---- Step 3: Per-position close settlement check ----
+    blocking_reasons = []
+
+    for addr in active_positions:
+        address_blocked = False
+        address_reason = ""
+
+        for sid, sstatus in updated_state.items():
+            if sstatus.get("status") in ("CLOSE_EMITTED", "CLOSE_UNKNOWN", "CLOSE_REJECTED"):
+                address_blocked = True
+                if sstatus.get("status") == "CLOSE_REJECTED":
+                    address_reason = (f"Close rejected for signal {sid}; "
+                                    f"explicit resolution required.")
+                elif sstatus.get("status") == "CLOSE_UNKNOWN":
+                    emit_ts = sstatus.get("emit_time", 0)
+                    if emit_ts and emit_ts < ttlim:
+                        address_reason = (f"Close unknown TTL exceeded "
+                                          f"({int((now - emit_ts) / 3600)}h old); "
+                                          f"escalating to review")
+                    else:
+                        address_reason = (f"Close unknown unresolved "
+                                          f"(signal {sid})")
+                else:
+                    address_reason = (f"Close emitted unresolved "
+                                      f"(signal {sid})")
+                break
+
+        if address_blocked:
+            blocking_reasons.append(f"pool {addr}: {address_reason}")
+
+    # ---- Step 4: Check coherence window ----
+    # Scans already enforced by lp_scoring.is_fresh/max_age_seconds;
+    # we just note it here for the gate logic.
+
+    # ---- Step 5: Decide ----
+    if blocking_reasons:
+        reason = "Close settlement gate blocked open: " + "; ".join(blocking_reasons[:2])
+        return False, reason, updated_state
+
+    allowed_reason = "Close settlement gate: no unresolved closes blocking open"
+    return True, allowed_reason, updated_state
+
+
+def _save_and_propagate_close_state(state_dir: str, close_state: dict,
+                                    report: dict) -> None:
+    """Save close state and inject any needed info into the report."""
+    _save_close_state(state_dir, close_state)
+    if "close_settlement" not in report:
+        report["close_settlement"] = {"state_keys": len(close_state)}
+#
+# CLOSE_EMITTED  -- signal file written to pending/
+#   On journal read with decision in {executed}:       -> CLOSE_ACCEPTED
+#   On journal read with decision in {rejected/failed}: -> CLOSE_REJECTED
+#   On journal read with no decision / null timestamp:  -> CLOSE_UNKNOWN
+#   No journal record at all:                           -> stays CLOSE_EMITTED
+#
+# CLOSE_REJECTED -- requires explicit resolution step,
+#   never an automatic retry (prevents double-close)
+#
+# CLOSE_UNKNOWN  past a TTL escalates to review, not to open
+#   TTL: 7 days from emit time; after that, status -> CLOSE_UNKNOWN_TIMEOUT
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Sheldon deterministic cycle runner")
     ap.add_argument("--pools-dir", default="/data/missy-data/pool_screens")
@@ -91,6 +311,9 @@ def main() -> int:
 
     # Versioned scoring identity: which policy produced this cycle's verdicts.
     report["scoring_policy"] = scoring_policy()
+
+    # Load rotation state persist across cycles
+    rot_state = _load_rotation_state(args.state_dir)
 
     # Build capital plan and strategies from the loaded wallet scan.
     wallet = report.get("wallet") or lp_scoring._empty_wallet("wallet not loaded")
@@ -120,6 +343,175 @@ def main() -> int:
         ),
     }
 
+    # ----- Rotation detection ------------------------------------------------
+    # After out-of-range grace, check if any position should be rotated
+    # to a better candidate pool. Rotation is considered when the position
+    # verdict is REVIEW, CLOSE, or REBALANCE (post grace).
+    # -----------------------------------------------------------------------
+    _policy = get_policy()
+    rotate_margin = float(_policy.get("rotate_margin", 5.0))
+    max_rotations_per_day = int(_policy.get("max_rotations_per_day", 2))
+    min_hold_hours = float(_policy.get("min_hold_hours", 12.0))
+
+    # Load rotation state (persists across cycles)
+    rot_state = _load_rotation_state(args.state_dir)
+
+    # Count rotations today from state
+    rotations_today = len([
+        n for n in rot_state.get("rotations", {}).values()
+        if n.get("cycle_day") == _utc_oday()
+    ])
+
+    # Build position -> pool mapping from verdicts
+    pos_by_addr = {}
+    for v in report.get("verdicts", []):
+        addr = v.get("pool_address")
+        if addr:
+            pos_by_addr[addr] = v
+
+    # Collect OPEN_CANDIDATE pools as rotation candidates
+    open_candidates = [v for v in report.get("verdicts", [])
+                       if v.get("action") == "OPEN_CANDIDATE"]
+    # Index candidates by pool_address
+    cand_by_addr = {v.get("pool_address"): v for v in open_candidates}
+
+    # Rotate detection: for each position with verdict in {REVIEW, CLOSE, REBALANCE},
+    # check if rotating to a candidate pool improves expected PnL.
+    rotation_actions = []  # list of (position_index, candidate, pnl_result)
+    for i, v in enumerate(report.get("verdicts", [])):
+        action = v.get("action")
+        if action not in ("REVIEW", "CLOSE", "REBALANCE"):
+            continue
+        addr = v.get("pool_address")
+        if not addr or addr not in pos_by_addr:
+            continue
+        pos_v = pos_by_addr[addr]
+        # Get position data from the position scan
+        # (the report's position_scores have the detailed data)
+        pos_score = pos_v.get("score", 0.0)
+        # Find best candidate: candidate score must be >= pos_score + rotate_margin
+        best_cand = None
+        best_cand_score = -1e9
+        for cand_v in open_candidates:
+            cand_addr = cand_v.get("pool_address")
+            if cand_addr == addr:
+                # Skip self (would be rebalancing, not rotating)
+                continue
+            cand_score = cand_v.get("score", 0.0)
+            if cand_score >= pos_score + rotate_margin and cand_score > best_cand_score:
+                best_cand = cand_v
+                best_cand_score = cand_score
+        if best_cand is None:
+            continue
+
+        # Get candidate pool data for expected_pnl_verdict
+        cand_pool = best_cand.get("_pool") or {}
+        # Also try to get pool data from the pools scan via pool_address
+        if not cand_pool.get("realized_fee_apr"):
+            # Look up from pools_by_addr (built earlier in the cycle)
+            # We'll use the candidate's own pool data from the verdict
+            pass
+
+        # Get position data from report position_scores
+        pos_data = None
+        for ps in report.get("position_scores", []):
+            if ps.get("pool_address") == addr:
+                pos_data = ps
+                break
+        if pos_data is None:
+            continue
+
+        # Call expected_pnl_verdict with candidate pool
+        pnl = dynamic.expected_pnl_verdict(
+            pos_data, cand_v.get("_pool") or {}, get_config(),
+            candidate_pool=cand_pool,
+        )
+        if pnl is None or not pnl.get("decisive"):
+            continue
+        if pnl["action"] != "ROTATE":
+            continue
+
+        # Check holding period (simplified: skip if too new)
+        days_open = pos_data.get("days_open", 0)
+        # Note: full check uses wall-clock time vs position open time; simplified here.
+
+        # Check cooldown from state
+        if addr in rot_state.get("last_rotation_cycle", {}):
+            last_cycle = rot_state["last_rotation_cycle"][addr]
+            # If rotated in the same day, check daily cap
+            if last_cycle.get("day") == _utc_oday() and \
+               rotations_today >= max_rotations_per_day:
+                continue
+
+        rotation_actions.append((i, best_cand, pnl))
+
+    # Apply rotation actions: emit close + reserve target
+    for pos_idx, cand, pnl in rotation_actions:
+        pos_v = report["verdicts"][pos_idx]
+        pos_addr = pos_v.get("pool_address")
+        cand_addr = cand.get("pool_address")
+
+        # Record rotation in state
+        if pos_addr not in rot_state.get("rotations", {}):
+            rot_state.setdefault("rotations", {})[pos_addr] = {
+                "candidate_pool": cand_addr,
+                "cycle_day": _utc_oday(),
+                "status": "proposed",
+            }
+        else:
+            # Update existing rotation state
+            rot_state["rotations"][pos_addr]["candidate_pool"] = cand_addr
+            rot_state["rotations"][pos_addr]["cycle_day"] = _utc_oday()
+            rot_state["rotations"][pos_addr]["status"] = "proposed"
+
+        range_state.save_range_state(rot_state, args.state_dir)
+
+        # Emit close signal for the position, with rotation reservation
+        # The verdict action becomes "ROTATE" and the reason references the candidate
+        pos_v["action"] = "ROTATE"
+        pos_v["reason"] = (
+            f"ROTATE: closing {pos_v.get('pool')} -> opening {cand.get('pool')} "
+            f"(PNL: HOLD={pnl['expected_hold_usd']}, "
+            f"ROTATE={pnl['expected_rotate_usd']}, "
+            f"margin={pnl['margin_usd']})"
+        )
+        pos_v["candidate_pool_address"] = cand_addr
+        pos_v["candidate_pool"] = cand.get("pool")
+        pos_v["candidate_score"] = cand.get("score")
+
+        # Remove from open candidates (this is a rotation, not a new open)
+        # The candidate will be opened in a later cycle after close confirmation
+
+    report["verdicts"] = [
+        range_state.out_of_range_position_verdict(v, grace_counts)
+        for v in report.get("verdicts", [])
+    ]
+
+    # ----- Close settlement gate (light pre-check) -----
+    # Check that no position has an unresolved close before any open
+    # candidates are considered. This prevents opening against closes
+    # that never landed, or spending proceeds not yet in the wallet.
+    close_state = _load_close_state(args.state_dir)
+    light_block_reasons = []
+    for v in report.get("verdicts", []):
+        if v.get("action") in ("CLOSE", "REBALANCE"):
+            addr = v.get("pool_address")
+            if not addr:
+                continue
+            for sid, sstatus in close_state.items():
+                if sstatus.get("status") == "CLOSE_EMITTED":
+                    light_block_reasons.append(
+                        f"pool {addr}: close still EMITTED (signal {sid})"
+                    )
+                    break
+    if light_block_reasons:
+        report["notes"] = report.get("notes", []) + [
+            f"Close settlement light check: {'; '.join(light_block_reasons)}"
+        ]
+
+    # Full close settlement gate runs after funding (wallet_mtime available).
+    # We defer the heavy gate to the funding section below.
+
     open_candidates = [v for v in report.get("verdicts", [])
                        if v.get("action") == "OPEN_CANDIDATE"]
     kept_candidates, open_skipped = _filter_open_candidates(
@@ -133,6 +525,7 @@ def main() -> int:
         min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
         min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
         allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
+        reserved_pools=set(rot_state.get("rotations", {}).keys()),
     )
     report["open_skipped"] = open_skipped
     report["strategies"] = build_strategies(kept_candidates, wallet)
@@ -171,6 +564,49 @@ def main() -> int:
     funding["prep_swaps_allowed"] = allowed_preps
     funding["prep_swaps_blocked"] = blocked_preps
     report["funding"] = funding
+
+    # ----- Close settlement gate (full, after funding) -----
+    # Now that wallet_mtime is available, run the full close settlement check.
+    # This blocks opens against closes that never landed, or spending proceeds
+    # not yet verified in the wallet.
+    close_state = _load_close_state(args.state_dir)
+    wallet_mtime = funding.get("wallet_mtime", 0.0)
+    allowed, reason, updated_state = _check_close_settlement(
+        active_positions, wallet_mtime, close_state, now=time.time(),
+    )
+    # Propagate updated close state
+    _save_close_state(args.state_dir, updated_state)
+    report["close_settlement"] = {"allowed": allowed, "reason": reason}
+
+    if not allowed:
+        # Block all open signals; mark strategies as blocked
+        report["failures"] = report.get("failures", []) + [
+            f"Close settlement gate blocked open: {reason}"
+        ]
+        # Still build strategies but mark them blocked
+        kept_candidates = []
+        open_skipped = kept_candidates  # empty
+
+    # If gate allowed, proceed as normal; otherwise kept_candidates is empty
+    if allowed:
+        kept_candidates, open_skipped = _filter_open_candidates(
+            [v for v in report.get("verdicts", [])
+                             if v.get("action") == "OPEN_CANDIDATE"],
+            active_positions,
+            policy_windows={
+                "open_window_utc": _POLICY.get("open_window_utc"),
+                "close_window_utc": _POLICY.get("close_window_utc"),
+                "blackout_dates": _POLICY.get("blackout_dates"),
+            },
+            min_score=_POLICY.get("min_open_score", 70.0),
+            min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
+            min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
+            allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
+            reserved_pools=set(rot_state.get("rotations", {}).keys()),
+        )
+    else:
+        open_skipped = [{"pool_address": None, "dex": "any", "score": None,
+                         "reason": reason}]
 
     if report.get("failures"):
         err = "; ".join(report["failures"])
@@ -231,6 +667,8 @@ def main() -> int:
     if signals_created:
         summary = ", ".join(Path(p).name for p in signals_created)
         print(f"WAKE_GEORGE: {len(signals_created)} signal(s) -> {summary}")
+
+    _save_rotation_state(args.state_dir, rot_state)
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)

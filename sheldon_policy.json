@@ -69,5 +69,8 @@
   "y_side_room_pct": 25,
   "max_wallet_scan_age_seconds": 900
  },
- "remove_policy": {}
+ "remove_policy": {},
+  "rotate_margin": 5.0,
+  "max_rotations_per_day": 2,
+  "min_hold_hours": 12
 }

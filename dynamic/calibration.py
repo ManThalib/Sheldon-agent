@@ -8,6 +8,7 @@ and weight-adjustment logic.
 Mirrors the context-assembly and calibration functions from the original dynamic.py.
 """
 
+import json
 import math
 import os
 from typing import Any, Dict, List, Optional
@@ -166,13 +167,18 @@ def _load_prior_scans(pools_dir: str, current_path: str, limit: int) -> List[Lis
     return scans
 
 
-def expected_pnl_verdict(pos, pool, cfg) -> Optional[Dict[str, Any]]:
-    """Compare expected value of HOLD vs CLOSE vs REBALANCE over a horizon.
+def expected_pnl_verdict(pos, pool, cfg, candidate_pool=None) -> Optional[Dict[str, Any]]:
+    """Compare expected value of HOLD vs CLOSE vs REBALANCE vs ROTATE over a horizon.
 
     Returns a dict with per-action expected USD and the chosen action, or
     ``None`` when inputs are insufficient or the decision is not decisive
     enough to override the score-based verdict.
+
+    If ``candidate_pool`` is provided, a fourth ``ROTATE`` option is computed
+    as:  C_yield - entry_cost - exit_cost - swap_cost - claim_cost
+    where C_yield is the candidate pool's fee yield projected over the horizon.
     """
+
     pnl_cfg = (cfg.get("dynamic") or {}).get("position_pnl") or {}
     if not pnl_cfg.get("enabled", False):
         return None
@@ -201,6 +207,7 @@ def expected_pnl_verdict(pos, pool, cfg) -> Optional[Dict[str, Any]]:
     entry_bps = float(pnl_cfg.get("entry_cost_bps", 50.0))
     exit_bps = float(pnl_cfg.get("exit_cost_bps", 50.0))
     claim_usd = float(pnl_cfg.get("claim_cost_usd", 0.02))
+    max_slippage_bps = float(pnl_cfg.get("default_max_slippage_bps", 100.0))
 
     # Fees accrue only while in range; a fresh centred range starts at ~0 IL.
     fee_mult = 1.0 if in_range else 0.0
@@ -210,6 +217,7 @@ def expected_pnl_verdict(pos, pool, cfg) -> Optional[Dict[str, Any]]:
 
     exit_cost = value * exit_bps / 10000.0 + claim_usd
     entry_cost = value * entry_bps / 10000.0
+    swap_cost = value * max_slippage_bps / 10000.0
 
     expected_hold = fwd_fees - il_hold
     expected_close = -exit_cost
@@ -218,6 +226,18 @@ def expected_pnl_verdict(pos, pool, cfg) -> Optional[Dict[str, Any]]:
     options = [("HOLD", expected_hold),
                ("CLOSE", expected_close),
                ("REBALANCE", expected_rebalance)]
+
+    # ROTATE: rotate from current position into a candidate pool
+    if candidate_pool is not None:
+        cand_apr = float(candidate_pool.get("realized_fee_apr") or 0.0)
+        cand_vol = float(candidate_pool.get("volatility") or 0.0)
+        if cand_apr > 0 and cand_vol > 0 and value > 0:
+            value_f = float(value)
+            # Candidate yield over horizon (projected from pool APR)
+            fwd_fees_cand = value_f * (cand_apr / 100.0) * horizon / 365.0
+            expected_rotate = fwd_fees_cand - entry_cost - exit_cost - swap_cost - claim_usd
+            options.append(("ROTATE", expected_rotate))
+
     ordered = sorted(options, key=lambda kv: kv[1], reverse=True)
     action, best = ordered[0]
     margin = best - ordered[1][1]
@@ -227,6 +247,7 @@ def expected_pnl_verdict(pos, pool, cfg) -> Optional[Dict[str, Any]]:
         "expected_hold_usd": round(expected_hold, 4),
         "expected_close_usd": round(expected_close, 4),
         "expected_rebalance_usd": round(expected_rebalance, 4),
+        "expected_rotate_usd": round(options[-1][1], 4) if len(options) > 3 else None,
         "margin_usd": round(margin, 4),
         "in_range": in_range,
         "forward_fees_usd": round(fwd_fees, 4),

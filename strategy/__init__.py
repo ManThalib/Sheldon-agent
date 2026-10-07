@@ -4,7 +4,7 @@ Re-exports key symbols for backward compatibility with run_cycle.py.
 Each sub-module has a clear responsibility:
   - sheldon_policy.py — policy loading and constants
   - position_sizing.py — position sizing
-  - range — volatility-adaptive range width (_7d_volatility_based.py)
+  - _7d_volatility_based.py — volatility-adaptive range width
   - candidate_filtering.py — open candidate filtering and strategy building
   - capital_plan.py — capital plan
 """
@@ -21,7 +21,7 @@ from strategy.sheldon_policy import (
     scoring_policy,
 )
 from strategy.position_sizing import suggested_position_usd, open_eligible
-from strategy.range import (
+from strategy.width._7d_volatility_based import (
     adaptive_half_width,
     _range_center,
     meteora_bin_step_allowed,

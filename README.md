@@ -45,6 +45,7 @@ python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N] \
   - `funding.py` — funding plan builder
   - `prep_swap_gates.py` — swap gating (rescan wait + hourly loop guards)
   - `prep_swap.py` — build George-schema swap signals
+  - `prep_ledger.py` — ledger rescan wait and hour‑guarded prep ledger
 - `backtest/` — historical replay with synthetic PnL:
   - `__init__.py` — package re-exports
   - `pool_replay.py` — pool scan replay
