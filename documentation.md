@@ -62,6 +62,16 @@ that produced it. George's `common/rails_loader.py` reads `min_open_score`
 from the same `scoring` block (falling back to the legacy
 `pool_eligibility` path) and exposes `scoring_source` for diagnostics.
 
+**Cross-model**: Every `pool_scores` entry from the Missy path now also carries
+`new_fc_score`, `new_fc_components`, `new_fc_verdict`, and `cross_model`
+fields. These reflect the experimental fee-capture model (log-scaled fee/TVL
+ratio, daily fee USD, volatility effectiveness, turnover penalty) and provide
+a secondary lens alongside missy-default. The `cross_model` field notes
+agreement (`both open (agreement)`) or disagreement (`missy=open new_fc=ignore`)
+between the two models. This aids diagnostics: significant disagreement
+triggers investigation into `fee_tvl_ratio`, turnover sustainability, or
+volatility effectiveness.
+
 ### Backtest: scoring source and gate agreement
 
 `backtest.py` replays history through either scorer:
@@ -126,6 +136,28 @@ Triangular curve peaking at the class peak (0.5% / 8% / 10%):
 - vol ≥ 3×peak → 0
 - vol ≤ peak: `max_pts * vol/peak`; above: `max_pts * (3*peak - vol)/(2*peak)`
 
+**NEW: liquidity_effectiveness concept** — incorporates the 15% target volatility
+from the experimental fee-capture model. Volatility near 15% receives a bonus,
+while extreme volatility is further penalized, since concentrated volatility can
+reduce capital efficiency even within acceptable bounds.
+
+#### `score_pool_new_fc(pool, ctx)` (experimental fee-capture model)
+
+Computes `new_fc_score` (0-100) with five component breakdowns:
+
+| Component | Weight | What it measures |
+|---|---|---|
+| `fee_yield_score` | 35% | Log-scaled fee/TVL ratio normalised 0.05%→5% |
+| `absolute_fee_score` | 25% | Daily fee USD vs $200 benchmark |
+| `liquidity_effectiveness` | 20% | Penalty for volatility deviating from 15% target |
+| `turnover_penalty_score` | 10% | Rewards moderate turnover, caps at 20×TVL/day |
+| `lp_share_adjustment` | 10% | Proportion of fees to single LP (not computed here) |
+
+The total score is a weighted sum of these components using pair-class weights
+from `profiles.json` (or experimental defaults if the profile lacks
+`new_fc_weights`). This model is distinct from missy-default (APR/TVL/volatility)
+and provides a complementary lens for pool selection decisions.
+
 #### `score_pool_depeg_safety(pool, max_pts, sym_x, sym_y)`
 
 Stable side(s) only; worst side wins:
@@ -142,6 +174,17 @@ not applicable (no stable side) → full credit
 Each component returns `(points, known)`. Unknown inputs still contribute
 `max_pts × unknown_credit` (0.5) to the score but are recorded in
 `data_quality.unknown_components`, which caps the verdict at REVIEW.
+
+**NEW: new_fc_score** (experimental, complementary to missy-default).
+The position result now carries `new_fc_score`, `new_fc_components`,
+`new_fc_verdict`, and `cross_model` fields from the fee-capture model.
+These provide a secondary lens on position health: `fee_yield_score` reflects
+fee efficiency relative to TVL, `liquidity_effectiveness` penalizes volatility
+deviating from 15% target, and `turnover_penalty_score` rewards moderate
+turnover (< 20×TVL/day). The `cross_model` field notes agreement or disagreement
+between the missy-default and new_fc verdicts. This does not replace the
+position health score — Sheldon's policy (weights, thresholds, verdicts)
+remains unchanged — but it aids diagnostics and rotation timing decisions.
 
 #### `score_position_range_status(pos, max_pts)`
 
@@ -240,8 +283,12 @@ leftover idle → `add_liquidity` sweep. HOLD/REVIEW/WATCH/IGNORE produce no sig
 
 ### `_range_center(pool, dex)` (also `strategy._range_center`)
 
-- Meteora: `active_bin_id`
-- Raydium/Orca: `current_tick` → `current_tick_index` → `active_bin_id`
+- Meteora: `active_bin_id` > `current_tick_equivalent` (RPC-batched) >
+  `current_tick_index` — RPC-batched tick enrichment (`tick_source: "rpc_batched"`)
+  from `SOLANA_RPC_URL` fills `active_bin_id`, `current_tick_index`, and
+  `current_tick_equivalent` fields, given high precedence over legacy values.
+- Raydium/Orca: `current_tick_equivalent` > `current_tick` > `current_tick_index` >
+  `active_bin_id` — RPC-enriched fields given high precedence.
 
 ### Capital input (`capital.summarize_wallet`, `readiness.load_raw_wallet`)
 
@@ -481,7 +528,46 @@ flowchart TD
 - **Range**: `lower = center - half_width`, `upper = center + half_width`
 - **Width constraint**: `upper - lower + 1 <= 70` bins (George executor rail)
 
-### Signal Schema for George
+### Data Quality Tracking
+
+Each position result carries:
+
+```json
+"data_quality": {
+  "unknown_components": ["fee_capture", "il_risk"],
+  "policy_close": false
+}
+```
+
+`policy_close: true` marks the off-universe hard gate. Consumers (dashboards,
+George) can distinguish "bad position" from "bad data".
+
+**NEW: position_features v1 and cross-model decisions** (see `scoring/position/score.py`).
+
+- **Missy owns the feature vector**: `position_features` version 1 carries facts +
+  `gaps`; no verdict is embedded. Sheldon owns policy: weights, thresholds,
+  verdicts. Only the *inputs* come from Missy's features; gaps surface as
+  `unknown_components` and cap the verdict at REVIEW (fail-closed).
+- **Gates**: `status == "unknown"` → skip. `gaps` contains `value_unknown` or
+  `fees_unknown` → mark UNVERIFIABLE, do not close/reopen on APR alone.
+- **Cross-model**: Position scoring now carries `new_fc_score`, `new_fc_components`,
+  `new_fc_verdict`, and `cross_model` from the fee-capture model (see Pool LP
+  Opportunity Score section). `cross_model` notes agreement (`both open
+  (agreement)`) or disagreement (`missy=open new_fc=ignore`). This does not
+  replace the position health score but aids rotation timing and diagnostics.
+- **Range-risk comparable cross-DEX**: `edge_distance_frac` + `bins_to_lower/upper`
+  normalize Meteora bins and Orca/Raydium ticks into one geometry, so one rule
+  works for DLMM + Whirlpool + CLMM.
+- **Realized vs projected yield**: `fees_apr_pct` (what this position actually
+  earned) vs `pool_realized_fee_apr` (what the pool paid) exposes mis-positioned
+  ranges even when pool APR looks high.
+- **Side-drift / IL early warning**: `side_bias_x` + `single_sided` shows when a
+  position has gone 100% one token (out-of-range), before value collapses.
+- **Auditability**: `version` + `gaps` + `pending_fees_source` (`computed` vs
+  `raw_checkpoint` vs `raw_per_bin_sum`) tells exactly how much to trust each
+  dollar figure.
+
+## Signal Schema for George
 
 ```json
 {

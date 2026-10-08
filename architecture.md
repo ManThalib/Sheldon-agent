@@ -92,6 +92,7 @@ Tests: `python3 -m unittest discover` or individually:
 | `depth` | 15 | 15 | 15 | TVL log-scale $50k-$5M |
 | `volatility_fit` | 10 | 20 | 35 | Triangular curve peaking at class vol peak |
 | `depeg_safety` | 25 | 15 | — | Stable-side distance from $1 |
+| `new_fc_score` | — | — | — | **Experimental**: fee-capture model score (0-100) with components: fee_yield_score (35%), absolute_fee_score (25%), liquidity_effectiveness (20%), turnover_penalty_score (10%), lp_share_adjustment (10%). Complements missy-default (APR/TVL/volatility) model. |
 
 ### Position Health Score (sum to 100)
 
