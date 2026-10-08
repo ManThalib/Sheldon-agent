@@ -167,8 +167,16 @@ class ViewMappingTests(unittest.TestCase):
         self.assertEqual(view["in_range"], True)
         self.assertEqual(view["lower_bound"], 100)
         self.assertEqual(view["days_open"], 1.41)
-        self.assertIsNone(view.get("lower_price"))  # absent on purpose
+        self.assertIsNone(view.get("lower_price"))  # raw _pos() carries no prices
         self.assertIsNone(view.get("token_x_amount"))
+        # Prices come from the raw record (features carry none); they feed
+        # the expected-PnL verdict and stay None when the scan lacks them.
+        priced = _view_from_features(
+            _pos(lower_price=0.0084, upper_price=0.0087, current_price=0.0084),
+            _features())
+        self.assertEqual(priced["lower_price"], 0.0084)
+        self.assertEqual(priced["upper_price"], 0.0087)
+        self.assertEqual(priced["current_price"], 0.0084)
 
     def test_gap_gates_fees_and_value(self):
         view = _view_from_features(_pos(), _features(

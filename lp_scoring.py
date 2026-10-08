@@ -945,9 +945,11 @@ def score_position_missy(pos: dict, pools_by_addr: dict = None,
 def _view_from_features(pos: dict, features: dict) -> dict:
     """Map Missy's feature vector onto the keys the scoring policy reads.
 
-    Format adaptation only — no scoring decisions here. Keys deliberately
-    left absent (prices, token amounts, il/fee estimates) route through the
-    policy's existing unknown-data paths.
+    Format adaptation only — no scoring decisions here. Prices come from the
+    raw position record (the feature vector does not carry them) and feed the
+    expected-PnL verdict; absent prices (RPC-fallback scans) stay None and
+    route through the policy's existing unknown-data paths. Token amounts and
+    il/fee estimates remain deliberately absent.
     """
     gaps = set(features.get("gaps") or [])
     return {
@@ -963,6 +965,9 @@ def _view_from_features(pos: dict, features: dict) -> dict:
         "current_value_usd": (features.get("value_usd")
                               if features.get("value_known") else None),
         "days_open": features.get("days_open"),
+        "lower_price": pos.get("lower_price"),
+        "upper_price": pos.get("upper_price"),
+        "current_price": pos.get("current_price"),
     }
 
 
@@ -1063,6 +1068,9 @@ def _score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
             "pair_class": pair_class, "pair": [sym_x, sym_y],
             "lower_bound": pos.get("lower_bound"),
             "upper_bound": pos.get("upper_bound"),
+            "lower_price": pos.get("lower_price"),
+            "upper_price": pos.get("upper_price"),
+            "current_price": pos.get("current_price"),
             "current_value_usd": pos.get("current_value_usd"),
             "days_open": pos.get("days_open"),
             "fees_usd": fees,

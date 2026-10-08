@@ -111,11 +111,12 @@
     },
     "position_pnl": {
       "enabled": true,
-      "horizon_days": 1.0,
+      "horizon_days": 3.0,
       "entry_cost_bps": 50.0,
       "exit_cost_bps": 50.0,
       "claim_cost_usd": 0.02,
-      "min_pnl_margin_usd": 0.01
+      "min_pnl_margin_usd": 0.50,
+      "default_max_slippage_bps": 100.0
     }
   }
 }
