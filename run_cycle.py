@@ -22,14 +22,17 @@ from typing import Optional
 
 import lp_scoring
 import range_state
-from capital import DUST_MIN_USD
+from capital import DUST_MIN_USD, USDC_MINT
 from idle_sweep import execute_sweep, load_add_state, plan_sweep
 from readiness import (
     PREP_OSCILLATION_WINDOW_SECONDS,
     build_prep_swap_signal,
+    build_readiness,
     gate_prep_swaps,
     load_raw_wallet,
     plan_funding,
+    plan_sol_top_up,
+    sol_overhead_lamports,
     prep_ledger,
 )
 from readiness.prep_ledger import read_journal
@@ -590,11 +593,19 @@ def main() -> int:
 
     raw_wallet = load_raw_wallet(args.wallet_scans_dir)
     dust_mints = {a.get("mint") for a in (wallet.get("dust_assets") or []) if a.get("mint")}
+    # Keep the complete non-position SOL overhead unavailable to the funding
+    # walk. This replaces the old flat 0.02 SOL spend cap; readiness then
+    # checks the candidate-specific SOL requirement below.
+    funding_sol_reserve = sol_overhead_lamports(
+        report["strategies"][0].get("dex") if report["strategies"] else None,
+        sol_policy=(_POLICY.get("sol") or {}),
+    )
     funding = plan_funding(
         report["strategies"], raw_wallet["assets"],
         wallet_path=raw_wallet["path"], wallet_mtime=raw_wallet["mtime"],
         dust_mints=dust_mints,
         recent_buy_mints=recent_buy_mints,
+        sol_reserve_lamports=funding_sol_reserve,
     )
     if raw_wallet.get("error"):
         funding["notes"].append(f"wallet scan unavailable: {raw_wallet['error']}")
@@ -607,7 +618,6 @@ def main() -> int:
     funding["prep_swaps_allowed"] = allowed_preps
     funding["prep_swaps_blocked"] = blocked_preps
     report["funding"] = funding
-
     # ----- Close settlement gate (full, after funding) -----
     # Now that wallet_mtime is available, run the full close settlement check.
     # This blocks opens against closes that never landed, or spending proceeds
@@ -621,6 +631,87 @@ def main() -> int:
     _save_close_state(args.state_dir, updated_state)
     report["close_settlement"] = {"allowed": allowed, "reason": reason}
 
+    # ----- Structured pre-open readiness (Phase 1) ------------------------
+    # Every strategy gets one additive readiness object.  The object is built
+    # after the close gate so its close_settled check is from this cycle, and
+    # before signals are written so an OPEN can never bypass it.
+    position_path = lp_scoring.newest_file(args.positions_dir, "position_scan")
+    try:
+        position_mtime = os.path.getmtime(position_path) if position_path else 0.0
+    except OSError:
+        position_mtime = 0.0
+    readiness_by_pool = {}
+    funding_entries = {
+        e.get("pool_address"): e
+        for e in (funding.get("funded") or []) + (funding.get("unfunded") or [])
+        if e.get("pool_address")
+    }
+    readiness_policy = (_POLICY.get("readiness") or {})
+    sol_policy = (_POLICY.get("sol") or {})
+    for strategy in report.get("strategies") or []:
+        pool_addr = strategy.get("pool_address")
+        readiness = build_readiness(
+            strategy,
+            assets=raw_wallet.get("assets") or [],
+            wallet_mtime=raw_wallet.get("mtime", 0.0),
+            position_mtime=position_mtime,
+            now=time.time(),
+            funding_entry=funding_entries.get(pool_addr),
+            close_settled=allowed,
+            close_reason=reason,
+            exposure_ready=bool(report.get("exposure_ready", True)),
+            readiness_policy=readiness_policy,
+            sol_policy=sol_policy,
+        )
+        readiness_by_pool[pool_addr] = readiness
+
+        # A top-up is actionable only for this specific candidate and only
+        # when every non-SOL readiness check already passes. The open remains
+        # blocked in this cycle; after the swap, the next fresh scan reruns the
+        # complete gate from the beginning.
+        if not readiness["ready"]:
+            top_up = plan_sol_top_up(
+                readiness,
+                assets=raw_wallet.get("assets") or [],
+                required_usdc_raw=(
+                    (funding_entries.get(pool_addr) or {}).get("required", {})
+                    .get("y_raw", 0)
+                    if ((funding_entries.get(pool_addr) or {}).get("required", {})
+                        .get("y_mint") == USDC_MINT)
+                    else 0
+                ),
+                sol_policy=sol_policy,
+            )
+            if top_up.get("allowed") and top_up.get("spec"):
+                funding.setdefault("prep_swaps_allowed", []).append(top_up["spec"])
+                readiness.setdefault("blocking_reasons", []).append(
+                    "SOL top-up planned; fresh wallet scan required before open"
+                )
+                readiness["top_up"] = top_up["spec"]
+
+    report["readiness"] = readiness_by_pool
+
+    # Enforce the gate: no open strategy survives without a passing
+    # readiness object. Blocked candidates become review items so the report
+    # explains why a high-scoring pool produced no open signal.
+    ready_strategies = []
+    for strategy in report.get("strategies") or []:
+        r = readiness_by_pool.get(strategy.get("pool_address"))
+        if r and r.get("ready"):
+            ready_strategies.append(strategy)
+        else:
+            reasons = "; ".join((r or {}).get("blocking_reasons") or [])
+            open_skipped.append({
+                "pool_address": strategy.get("pool_address"),
+                "dex": strategy.get("dex"),
+                "score": strategy.get("score"),
+                "reason": ("readiness gate: "
+                           + ((r or {}).get("status") or "no readiness object")
+                           + (f" ({reasons})" if reasons else "")),
+            })
+    report["strategies"] = ready_strategies
+    report["open_skipped"] = open_skipped
+
     if not allowed:
         # Normal rail outcome, not a fatal error: drop every open strategy so
         # no open signal can be written, hold prep swaps, keep the
@@ -631,6 +722,7 @@ def main() -> int:
         open_skipped = (report.get("open_skipped") or []) + [block_skip]
         report["open_skipped"] = open_skipped
         report["strategies"] = []
+        report["readiness"] = {}
         for spec in funding.get("prep_swaps_allowed") or []:
             funding.setdefault("prep_swaps_blocked", []).append({
                 **spec, "reason": "close settlement gate blocks opens",
@@ -647,7 +739,6 @@ def main() -> int:
             json.dump(report, sys.stdout, indent=2)
             print()
         return 2
-
     signals_created = []
     review = list(rotation_review)
     if args.write_signals:

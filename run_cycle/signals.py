@@ -255,6 +255,21 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                     "reason": f"OPEN deferred: {entry.get('reason') or 'tokens not funded'}",
                 })
                 continue
+            # Phase 1 backstop: never emit an open unless the structured
+            # readiness object for this pool passes every check. This holds
+            # even when write_signals is called without run_cycle's filter.
+            readiness = (report.get("readiness") or {}).get(pool_addr)
+            if readiness is None or not readiness.get("ready"):
+                review.append({
+                    "pool_address": pool_addr,
+                    "dex": dex,
+                    "score": v.get("score"),
+                    "evidence": v.get("evidence"),
+                    "reason": "OPEN blocked by readiness gate: "
+                              + ((readiness or {}).get("status")
+                                 or "no readiness object"),
+                })
+                continue
             # Get pool info for signal building
             pool = v.get("_pool") or {}
             strategy = strategies.get(pool_addr, {})

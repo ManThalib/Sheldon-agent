@@ -72,5 +72,32 @@
  "remove_policy": {},
   "rotate_margin": 5.0,
   "max_rotations_per_day": 2,
-  "min_hold_hours": 12
+  "min_hold_hours": 12,
+  "readiness": {
+    "_comment": "Phase 1 (2026-10-09): structured pre-open readiness. All checks mandatory in one cycle; a stale or missing scan blocks an open (fail closed).",
+    "require_fresh_wallet_scan": true,
+    "require_fresh_position_scan": true,
+    "require_both_tokens": true,
+    "require_sol_readiness": true,
+    "require_close_settlement": true,
+    "max_wallet_scan_age_seconds": 900,
+    "max_position_scan_age_seconds": 900
+  },
+  "sol": {
+    "_comment": "Phase 1 (2026-10-09): real rent/fee/reserve model replacing the 0.02 SOL spend cap. per_dex rent values are PLACEHOLDERS pending live calibration (host-only, 06-host-only-work.md item 5).",
+    "reserve_lamports": 20000000,
+    "auto_top_up_enabled": true,
+    "auto_top_up_source_mint": "USDC",
+    "max_top_up_usd": 10,
+    "top_up_buffer_pct": 20,
+    "min_post_top_up_lamports": 20000000
+  },
+  "rotation": {
+    "_comment": "Phase 2 (2026-10-09): rotation open requires close + position + wallet + token + SOL confirmation. Declared here; enforcement lands in Phase 2.",
+    "require_chain_close_verification": true,
+    "require_position_scan_confirmation": true,
+    "require_wallet_capital_confirmation": true,
+    "require_token_readiness": true,
+    "require_sol_readiness": true
+  }
 }

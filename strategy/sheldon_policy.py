@@ -64,6 +64,13 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["add_max_wallet_scan_age_seconds"] = float(
         add.get("max_wallet_scan_age_seconds", 900.0))
 
+    # Pre-open readiness, SOL policy and rotation requirements (Phase 1,
+    # 2026-10-09). Passed through verbatim; readiness.readiness_gate merges
+    # its own defaults, so a missing block simply yields the defaults.
+    policy["readiness"] = dict(data.get("readiness") or {})
+    policy["sol"] = dict(data.get("sol") or {})
+    policy["rotation"] = dict(data.get("rotation") or {})
+
     return policy
 
 

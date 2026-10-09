@@ -35,10 +35,15 @@ def _created_epoch(created_at: str) -> float:
         return 0.0
 
 
-def spendable(mint: str, asset: Dict[str, Any]) -> int:
-    """Return spendable raw amount for a mint, net of SOL reserve."""
+def spendable(mint: str, asset: Dict[str, Any],
+              sol_reserve_lamports: int = SOL_RESERVE_LAMPORTS) -> int:
+    """Return spendable raw amount net of the SOL reserve.
+
+    The default preserves direct callers; the cycle passes the readiness
+    model's rent/fee/reserve floor instead of the old 0.02 SOL cap.
+    """
     if mint == SOL_MINT:
-        return max(0, asset.get("amount_raw", 0) - SOL_RESERVE_LAMPORTS)
+        return max(0, asset.get("amount_raw", 0) - sol_reserve_lamports)
     return asset.get("amount_raw", 0)
 
 
@@ -49,6 +54,7 @@ def plan_funding(
     wallet_mtime: float = 0.0,
     dust_mints: Optional[Set[str]] = None,
     recent_buy_mints: Optional[Set[str]] = None,
+    sol_reserve_lamports: int = SOL_RESERVE_LAMPORTS,
 ) -> Dict[str, Any]:
     """Score-order funding walk across strategies.
 
@@ -83,7 +89,7 @@ def plan_funding(
 
     # Spendable per-mint balances.
     remaining: Dict[str, int] = {
-        mint: spendable(mint, asset)
+        mint: spendable(mint, asset, sol_reserve_lamports)
         for mint, asset in assets.items()
     }
     remaining.setdefault(USDC_MINT, 0)
@@ -233,7 +239,7 @@ def plan_funding(
         "notes": notes,
         "wallet_path": wallet_path,
         "wallet_mtime": wallet_mtime,
-        "sol_reserve_lamports": SOL_RESERVE_LAMPORTS,
+        "sol_reserve_lamports": sol_reserve_lamports,
     }
 
 # ---------------------------------------------------------------------------

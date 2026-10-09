@@ -18,9 +18,11 @@ from capital import RESERVED_MINTS, SOL_MINT, USDC_MINT, summarize_wallet
 from readiness import (
     MAX_PREP_SWAPS_PER_MINT_PER_HOUR,
     PREP_CONFIRM_GRACE_SECONDS,
+    build_readiness,
     gate_prep_swaps,
     load_raw_wallet,
     plan_funding,
+    sol_overhead_lamports,
 )
 from run_cycle import write_signals
 from strategy import (
@@ -756,13 +758,41 @@ class RunCycleIntegrationTests(unittest.TestCase):
         dust_mints = {a["mint"] for a in (report["wallet"].get("dust_assets") or [])}
         funding = plan_funding(report["strategies"], raw["assets"],
                                wallet_path=raw["path"], wallet_mtime=raw["mtime"],
-                               dust_mints=dust_mints)
+                               dust_mints=dust_mints,
+                               sol_reserve_lamports=sol_overhead_lamports(
+                                   report["strategies"][0].get("dex")
+                                   if report["strategies"] else None))
         allowed, blocked = gate_prep_swaps(
             funding["prep_swaps"], signals_dir, funding["wallet_mtime"]
         )
         funding["prep_swaps_allowed"] = allowed
         funding["prep_swaps_blocked"] = blocked
         report["funding"] = funding
+        # Phase 1: mirror main() and attach the structured readiness object
+        # the open gate requires (no open without a passing readiness object).
+        pos_path = lp_scoring.newest_file(self.pos_dir, "position_scan")
+        try:
+            position_mtime = os.path.getmtime(pos_path) if pos_path else 0.0
+        except OSError:
+            position_mtime = 0.0
+        funding_entries = {
+            e.get("pool_address"): e
+            for e in (funding.get("funded") or [])
+            + (funding.get("unfunded") or [])
+            if e.get("pool_address")
+        }
+        report["readiness"] = {
+            s.get("pool_address"): build_readiness(
+                s,
+                assets=raw["assets"],
+                wallet_mtime=raw["mtime"],
+                position_mtime=position_mtime,
+                now=time.time(),
+                funding_entry=funding_entries.get(s.get("pool_address")),
+                close_settled=True,
+            )
+            for s in report["strategies"]
+        }
         return write_signals(report, signals_dir, self.pos_dir)
 
     def test_write_signals_creates_dust_and_open(self):
@@ -782,9 +812,9 @@ class RunCycleIntegrationTests(unittest.TestCase):
                 {"mint": USDC_MINT, "amount_raw": "100000000", "amount_ui": 100.0,
                  "decimals": 6, "price_usd": 1.0, "total_value_usd": 100.0,
                  "is_native_sol": False},
-                {"mint": SOL_MINT, "symbol": "SOL", "amount_raw": "404615384",
-                 "amount_ui": 0.404615384, "decimals": 9, "price_usd": 117.0,
-                 "total_value_usd": 47.34, "is_native_sol": True},
+                {"mint": SOL_MINT, "symbol": "SOL", "amount_raw": "470000000",
+                 "amount_ui": 0.47, "decimals": 9, "price_usd": 117.0,
+                 "total_value_usd": 54.99, "is_native_sol": True},
                 {"mint": "DUST", "symbol": "DUST", "amount_raw": "1000000000",
                  "amount_ui": 1.0, "decimals": 9, "price_usd": 20.0,
                  "total_value_usd": 20.0, "is_native_sol": False},

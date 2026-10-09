@@ -15,6 +15,28 @@ from .wallet import load_raw_wallet, newest_wallet_scan
 from .funding import plan_funding, _required_amounts
 from .prep_swap_gates import gate_prep_swaps, _prep_swap_history, _created_epoch
 from .prep_swap import build_prep_swap_signal
+from .readiness_gate import (
+    DEFAULT_READINESS_POLICY,
+    DEFAULT_SOL_POLICY,
+    OPEN_BLOCKED_CANDIDATE_STALE,
+    OPEN_BLOCKED_CLOSE_UNSETTLED,
+    OPEN_BLOCKED_EXPOSURE,
+    OPEN_BLOCKED_POSITION_SCAN_STALE,
+    OPEN_BLOCKED_SOL,
+    OPEN_BLOCKED_TOKEN_X,
+    OPEN_BLOCKED_TOKEN_Y,
+    OPEN_BLOCKED_WALLET_SCAN_STALE,
+    OPEN_READY,
+    asset_index,
+    build_readiness,
+    merge_readiness_policy,
+    merge_sol_policy,
+    plan_sol_top_up,
+    pool_sol_token,
+    required_sol_lamports,
+    sol_overhead_lamports,
+    sol_price_usd,
+)
 from . import prep_ledger
 
 # Backward-compatible re-exports (mirror original readiness.py API)
@@ -61,6 +83,27 @@ __all__ = [
     "PREP_REJECT_COOLDOWN_SECONDS",
     "PREP_OSCILLATION_WINDOW_SECONDS",
     "DEFAULT_JOURNAL_DIR",
+    # Structured pre-open readiness (Phase 1, 2026-10-09)
+    "build_readiness",
+    "plan_sol_top_up",
+    "required_sol_lamports",
+    "sol_overhead_lamports",
+    "merge_readiness_policy",
+    "merge_sol_policy",
+    "sol_price_usd",
+    "pool_sol_token",
+    "asset_index",
+    "DEFAULT_READINESS_POLICY",
+    "DEFAULT_SOL_POLICY",
+    "OPEN_READY",
+    "OPEN_BLOCKED_SOL",
+    "OPEN_BLOCKED_TOKEN_X",
+    "OPEN_BLOCKED_TOKEN_Y",
+    "OPEN_BLOCKED_WALLET_SCAN_STALE",
+    "OPEN_BLOCKED_POSITION_SCAN_STALE",
+    "OPEN_BLOCKED_CLOSE_UNSETTLED",
+    "OPEN_BLOCKED_EXPOSURE",
+    "OPEN_BLOCKED_CANDIDATE_STALE",
 ]
 
 
