@@ -808,6 +808,109 @@ class RunCycleIntegrationTests(unittest.TestCase):
         self.assertNotIn("swap", actions)  # funded: no prep swap needed
         self.assertEqual(actions.count("swap_to_usdc"), 1)
 
+    def test_dust_sweep_skips_recent_prep_buy(self):
+        """Anti-oscillation for the dust path: a mint bought as capital prep
+        within the oscillation window must not be dust-swept back to USDC
+        (2026-10-08: WBTC bought at 19:44:13 was dust-swept at 19:44:31)."""
+        from readiness import prep_ledger
+
+        state_dir = os.path.join(self.root, "state")
+        ledger = {"entries": [{
+            "key": f"{USDC_MINT}|WBTC|buy|p2",
+            "input_mint": USDC_MINT,
+            "output_mint": "WBTC",
+            "direction": "buy",
+            "prep_for_pool": "p2",
+            "signal_id": "sheldon-prep-test-1",
+            "emitted_at": time.time() - 60.0,
+            "status": "executed",
+            "confirmed_at": time.time() - 30.0,
+            "in_amount": "51000000",
+            "out_amount": "61796",
+        }]}
+        prep_ledger.save_ledger(ledger, state_dir=state_dir)
+
+        report = {
+            "wallet": {
+                "wallet_id": "main",
+                "dust_assets": [
+                    {"mint": "WBTC", "symbol": "", "decimals": 8,
+                     "amount_raw": "61753", "amount_ui": 0.00061753,
+                     "price_usd": 82506.98, "value_usd": 50.95},
+                    {"mint": "OTHERDUST", "symbol": "", "decimals": 9,
+                     "amount_raw": "1000000000", "amount_ui": 1.0,
+                     "price_usd": 2.0, "value_usd": 2.0},
+                ],
+            },
+            "verdicts": [],
+            "open_skipped": [],
+            "strategies": [],
+            "funding": {"funded": [], "unfunded": [],
+                        "prep_swaps_allowed": [], "prep_swaps_blocked": []},
+        }
+        signals_dir = os.path.join(self.root, "signals")
+        created, _review = write_signals(
+            report, signals_dir, self.pos_dir, state_dir=state_dir,
+        )
+
+        dust_signals = []
+        for path in created:
+            with open(path, "r", encoding="utf-8") as fh:
+                sig = json.load(fh)
+            if sig.get("action") == "swap_to_usdc":
+                dust_signals.append(sig["mint"])
+        # The recent prep buy is protected; unrelated dust still sweeps.
+        self.assertNotIn("WBTC", dust_signals)
+        self.assertIn("OTHERDUST", dust_signals)
+
+    def test_dust_sweep_resumes_after_oscillation_window(self):
+        """Once the window passes, the same mint is sweepable again."""
+        from readiness import prep_ledger
+
+        state_dir = os.path.join(self.root, "state")
+        ledger = {"entries": [{
+            "key": f"{USDC_MINT}|WBTC|buy|p2",
+            "input_mint": USDC_MINT,
+            "output_mint": "WBTC",
+            "direction": "buy",
+            "prep_for_pool": "p2",
+            "signal_id": "sheldon-prep-test-2",
+            "emitted_at": time.time() - 7200.0,
+            "status": "executed",
+            "confirmed_at": time.time() - 7100.0,
+            "in_amount": "51000000",
+            "out_amount": "61796",
+        }]}
+        prep_ledger.save_ledger(ledger, state_dir=state_dir)
+
+        report = {
+            "wallet": {
+                "wallet_id": "main",
+                "dust_assets": [
+                    {"mint": "WBTC", "symbol": "", "decimals": 8,
+                     "amount_raw": "61753", "amount_ui": 0.00061753,
+                     "price_usd": 82506.98, "value_usd": 50.95},
+                ],
+            },
+            "verdicts": [],
+            "open_skipped": [],
+            "strategies": [],
+            "funding": {"funded": [], "unfunded": [],
+                        "prep_swaps_allowed": [], "prep_swaps_blocked": []},
+        }
+        signals_dir = os.path.join(self.root, "signals")
+        created, _review = write_signals(
+            report, signals_dir, self.pos_dir, state_dir=state_dir,
+        )
+
+        dust_signals = []
+        for path in created:
+            with open(path, "r", encoding="utf-8") as fh:
+                sig = json.load(fh)
+            if sig.get("action") == "swap_to_usdc":
+                dust_signals.append(sig["mint"])
+        self.assertIn("WBTC", dust_signals)
+
     def test_write_signals_defers_open_and_emits_prep_swap(self):
         pool = self._make_pool()
         with open(os.path.join(self.pools_dir, "pool_scan-x.json"), "w") as fh:

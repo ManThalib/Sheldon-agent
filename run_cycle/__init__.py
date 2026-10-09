@@ -106,10 +106,18 @@ def _build_dust_swap_signal(asset: dict, idx: int, base: int) -> dict:
     return _f(asset, idx, base)
 
 
-def write_signals(report: dict, signals_dir: str, positions_dir: str) -> tuple:
-    """Original write_signals from run_cycle.py (backward compatible)."""
+def write_signals(report: dict, signals_dir: str, positions_dir: str,
+                  min_open_score: float = 70.0,
+                  min_position_usd: float = 20.0,
+                  supported_dexes: set = None,
+                  state_dir: str = None) -> tuple:
+    """Backward-compatible wrapper for run_cycle.signals.write_signals."""
     from run_cycle.signals import write_signals as _f
-    return _f(report, signals_dir, positions_dir)
+    return _f(report, signals_dir, positions_dir,
+              min_open_score=min_open_score,
+              min_position_usd=min_position_usd,
+              supported_dexes=supported_dexes,
+              state_dir=state_dir)
 
 
 def append_log(report: dict, memory_dir: str, signals_created: list, review: list):

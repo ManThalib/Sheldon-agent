@@ -198,7 +198,22 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
         idx += 1
 
     # 1. Dust swap signals (executed before any new positions).
+    # Anti-oscillation (mirrors the surplus-sell guard in plan_funding): a
+    # mint bought as capital prep within the oscillation window exists to
+    # fund an open, not to be round-tripped to USDC as "dust" — even when it
+    # carries no symbol and the wallet classifier tags it. After the window
+    # (or once the open lands) it is sweepable again.
+    recent_prep_buys: set = set()
+    if state_dir:
+        try:
+            recent_prep_buys = prep_ledger.recent_buy_mints(
+                prep_ledger.load_ledger(state_dir),
+            )
+        except Exception:
+            recent_prep_buys = set()
     for asset in wallet.get("dust_assets", []):
+        if asset.get("mint") in recent_prep_buys:
+            continue
         signal = _build_dust_swap_signal(asset, idx, base)
         path = os.path.join(signals_dir, f"{signal['signal_id']}.json")
         with open(path, "w", encoding="utf-8") as fh:
