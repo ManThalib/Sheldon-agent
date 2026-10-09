@@ -107,189 +107,20 @@ def _save_rotation_state(state_dir: str, state: dict) -> None:
 
 
 # ----- Close settlement state -----
-
-CLOSE_STATE_FILENAME = "close_settlement_state.json"
-
-
-def _close_state_path(state_dir: str) -> str:
-    """Path to the close settlement state file."""
-    return os.path.join(state_dir, CLOSE_STATE_FILENAME)
-
-
-def _load_close_state(state_dir: str) -> dict:
-    """Load close settlement state from previous cycles.
-
-    Returns dict keyed by signal_id with status:
-      "CLOSE_EMITTED"     - signal file written to pending/
-      "CLOSE_ACCEPTED"    - journal record present, decision in {executed}
-      "CLOSE_REJECTED"    - journal decision in {rejected, failed, failed_verify}
-      "CLOSE_UNKNOWN"     - no journal record, or record lacks signature/timestamp
-    """
-    path = _close_state_path(state_dir)
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, dict):
-            # Ensure all values have a status field
-            for k, v in data.items():
-                if not isinstance(v, dict):
-                    data[k] = {"status": v}
-            return data
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
-    return {}
+# Phase 2: the full state machine lives in run_cycle/close_settlement.py
+# (states, journal folding, retry/review classification, settlement
+# advance). run_cycle.py keeps thin aliases so existing call sites and any
+# external callers of the historical helpers keep working.
+from run_cycle.close_settlement import (  # noqa: E402
+    CLOSE_STATE_FILENAME,
+    check_settlement,
+    load_close_state as _load_close_state,
+    mark_emitted,
+    record_emitted_closes,
+    save_close_state as _save_close_state,
+)
 
 
-def _save_close_state(state_dir: str, state: dict) -> None:
-    """Persist close settlement state atomically."""
-    path = _close_state_path(state_dir)
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, path)
-    except OSError:
-        pass
-
-
-def _close_status(signal_id: str, state: dict) -> str:
-    """Return the close status for a given signal_id, or CLOSE_UNKNOWN."""
-    entry = state.get(signal_id)
-    if entry and isinstance(entry, dict):
-        return entry.get("status", "CLOSE_UNKNOWN")
-    return "CLOSE_UNKNOWN"
-
-
-def _update_close_status(state: dict, signal_id: str, status: str) -> dict:
-    """Update close status for a signal_id in the state dict."""
-    entry = state.setdefault(signal_id, {})
-    if isinstance(entry, dict):
-        entry["status"] = status
-    else:
-        entry = {"status": status}
-    state[signal_id] = entry
-    return state
-
-
-def _check_close_settlement(active_positions: dict, wallet_mtime: float,
-                            close_state: dict, now: float = None) -> tuple:
-    """Check close settlement status before allowing any open.
-
-    Returns (allowed, reason, updated_close_state) tuple.
-
-    Rules (in order of priority):
-
-    1. No open for a pool/position while its close is CLOSE_EMITTED,
-       CLOSE_UNKNOWN, or CLOSE_REJECTED unresolved.
-
-    2. Open allowed only on FUNDS_VERIFIED (wallet scan newer than close
-       confirmation, position absent from newer scan).
-
-    3. CLOSE_REJECTED requires explicit resolution — never automatic retry.
-
-    4. CLOSE_UNKNOWN past TTL (7 days from emit) escalates to
-       CLOSE_UNKNOWN_TIMEOUT, still blocking open.
-
-    5. No in-flight signal for same wallet/pool/position in pending/.
-
-    6. No unresolved failed_verify entry for the same pool.
-
-    7. Scans within one coherence window (within 120 seconds).
-
-    Items 1, 7, and the TTL check (item 4) are load-bearing. Items 2, 5, 6
-    are defense-in-depth.
-    """
-    if now is None:
-        now = time.time()
-
-    ttl_days = 7 * 24 * 3600  # 7 days
-    ttlim = now - ttl_days
-
-    # ---- Step 1: Read George's journal for close decisions ----
-    journal_dir = prep_ledger.DEFAULT_JOURNAL_DIR
-    journal_resolutions = read_journal(journal_dir)  # maps signal_id -> {status, confirmed_at, ...}
-
-    # ---- Step 2: Build close status map from journal + state ----
-    updated_state = dict(close_state)  # shallow copy we'll modify
-
-    # Read all journal entries and update close status
-    for sid, res in journal_resolutions.items():
-        decision = res.get("decision")
-        if decision not in ("executed", "rejected", "failed", "failed_verify"):
-            continue
-        ts = res.get("confirmed_at") or res.get("timestamp") or 0.0
-        if decision == "executed" and ts:
-            new_status = "CLOSE_ACCEPTED"
-        elif decision in ("rejected", "failed", "failed_verify"):
-            new_status = "CLOSE_REJECTED"
-        else:
-            new_status = "CLOSE_UNKNOWN"
-
-        updated_state = _update_close_status(updated_state, sid, new_status)
-
-    # ---- Step 3: Per-position close settlement check ----
-    blocking_reasons = []
-
-    for addr in active_positions:
-        address_blocked = False
-        address_reason = ""
-
-        for sid, sstatus in updated_state.items():
-            if sstatus.get("status") in ("CLOSE_EMITTED", "CLOSE_UNKNOWN", "CLOSE_REJECTED"):
-                address_blocked = True
-                if sstatus.get("status") == "CLOSE_REJECTED":
-                    address_reason = (f"Close rejected for signal {sid}; "
-                                    f"explicit resolution required.")
-                elif sstatus.get("status") == "CLOSE_UNKNOWN":
-                    emit_ts = sstatus.get("emit_time", 0)
-                    if emit_ts and emit_ts < ttlim:
-                        address_reason = (f"Close unknown TTL exceeded "
-                                          f"({int((now - emit_ts) / 3600)}h old); "
-                                          f"escalating to review")
-                    else:
-                        address_reason = (f"Close unknown unresolved "
-                                          f"(signal {sid})")
-                else:
-                    address_reason = (f"Close emitted unresolved "
-                                      f"(signal {sid})")
-                break
-
-        if address_blocked:
-            blocking_reasons.append(f"pool {addr}: {address_reason}")
-
-    # ---- Step 4: Check coherence window ----
-    # Scans already enforced by lp_scoring.is_fresh/max_age_seconds;
-    # we just note it here for the gate logic.
-
-    # ---- Step 5: Decide ----
-    if blocking_reasons:
-        reason = "Close settlement gate blocked open: " + "; ".join(blocking_reasons[:2])
-        return False, reason, updated_state
-
-    allowed_reason = "Close settlement gate: no unresolved closes blocking open"
-    return True, allowed_reason, updated_state
-
-
-def _save_and_propagate_close_state(state_dir: str, close_state: dict,
-                                    report: dict) -> None:
-    """Save close state and inject any needed info into the report."""
-    _save_close_state(state_dir, close_state)
-    if "close_settlement" not in report:
-        report["close_settlement"] = {"state_keys": len(close_state)}
-#
-# CLOSE_EMITTED  -- signal file written to pending/
-#   On journal read with decision in {executed}:       -> CLOSE_ACCEPTED
-#   On journal read with decision in {rejected/failed}: -> CLOSE_REJECTED
-#   On journal read with no decision / null timestamp:  -> CLOSE_UNKNOWN
-#   No journal record at all:                           -> stays CLOSE_EMITTED
-#
-# CLOSE_REJECTED -- requires explicit resolution step,
-#   never an automatic retry (prevents double-close)
-#
-# CLOSE_UNKNOWN  past a TTL escalates to review, not to open
-#   TTL: 7 days from emit time; after that, status -> CLOSE_UNKNOWN_TIMEOUT
 
 
 def main() -> int:
@@ -328,6 +159,16 @@ def main() -> int:
     report["capital_plan"] = capital_plan(wallet)
 
     active_positions = _load_active_positions(args.positions_dir)
+
+    # Scan currency evidence, loaded once and shared by the rotation settle
+    # and the close settlement gate (Phase 2): the newest position scan
+    # mtime and the raw wallet scan (path, mtime, assets).
+    position_path = lp_scoring.newest_file(args.positions_dir, "position_scan")
+    try:
+        position_mtime = os.path.getmtime(position_path) if position_path else 0.0
+    except OSError:
+        position_mtime = 0.0
+    raw_wallet = load_raw_wallet(args.wallet_scans_dir)
 
     # Out-of-range grace (Mr. Man rail): a position that leaves its range
     # must survive ALLOWED_OUT_OF_RANGE_RUNS consecutive runs before a
@@ -374,7 +215,14 @@ def main() -> int:
     rotations = rot_state.setdefault("rotations", {})
     close_resolutions = read_journal(prep_ledger.DEFAULT_JOURNAL_DIR)
     rotation_review = _settle_rotations(
-        rotations, active_positions, close_resolutions, now_ts=now_ts)
+        rotations, active_positions, close_resolutions, now_ts=now_ts,
+        position_mtime=position_mtime,
+        wallet_mtime=raw_wallet.get("mtime", 0.0),
+        rotation_policy=(_POLICY.get("rotation") or {}),
+        max_position_scan_age=float(
+            (_POLICY.get("readiness") or {}).get(
+                "max_position_scan_age_seconds", 900.0)),
+    )
     pending_targets = {
         e.get("candidate_pool") for e in rotations.values()
         if isinstance(e, dict)
@@ -591,7 +439,6 @@ def main() -> int:
         prep_ledger_state, now=time.time(), window=PREP_OSCILLATION_WINDOW_SECONDS,
     )
 
-    raw_wallet = load_raw_wallet(args.wallet_scans_dir)
     dust_mints = {a.get("mint") for a in (wallet.get("dust_assets") or []) if a.get("mint")}
     # Keep the complete non-position SOL overhead unavailable to the funding
     # walk. This replaces the old flat 0.02 SOL spend cap; readiness then
@@ -619,27 +466,32 @@ def main() -> int:
     funding["prep_swaps_blocked"] = blocked_preps
     report["funding"] = funding
     # ----- Close settlement gate (full, after funding) -----
-    # Now that wallet_mtime is available, run the full close settlement check.
-    # This blocks opens against closes that never landed, or spending proceeds
-    # not yet verified in the wallet.
+    # Phase 2 state machine: a close is settled only on FUNDS_VERIFIED or
+    # CLOSE_RESOLVED — journal-executed, source absent from a position scan
+    # newer than the close confirmation and within scan-age policy, and a
+    # wallet scan newer than the confirmation. Anything else blocks opens.
+    # This verdict never gates closes/claims — only opens.
     close_state = _load_close_state(args.state_dir)
-    wallet_mtime = funding.get("wallet_mtime", 0.0)
-    allowed, reason, updated_state = _check_close_settlement(
-        active_positions, wallet_mtime, close_state, now=time.time(),
+    wallet_mtime = raw_wallet.get("mtime", 0.0)
+    rotation_policy = (_POLICY.get("rotation") or {})
+    max_position_scan_age = float(
+        (_POLICY.get("readiness") or {}).get(
+            "max_position_scan_age_seconds", 900.0))
+    allowed, reason, updated_state, close_details = check_settlement(
+        active_positions, wallet_mtime, position_mtime, close_state,
+        now=time.time(), policy=rotation_policy,
+        max_scan_age_seconds=max_position_scan_age,
     )
     # Propagate updated close state
     _save_close_state(args.state_dir, updated_state)
-    report["close_settlement"] = {"allowed": allowed, "reason": reason}
+    report["close_settlement"] = {
+        "allowed": allowed, "reason": reason, **close_details,
+    }
 
     # ----- Structured pre-open readiness (Phase 1) ------------------------
     # Every strategy gets one additive readiness object.  The object is built
     # after the close gate so its close_settled check is from this cycle, and
     # before signals are written so an OPEN can never bypass it.
-    position_path = lp_scoring.newest_file(args.positions_dir, "position_scan")
-    try:
-        position_mtime = os.path.getmtime(position_path) if position_path else 0.0
-    except OSError:
-        position_mtime = 0.0
     readiness_by_pool = {}
     funding_entries = {
         e.get("pool_address"): e
@@ -756,13 +608,25 @@ def main() -> int:
         )
 
         review.extend(signal_review)
+        # Link emitted close signals back to their awaiting rotation
+        # entries so the reservation tracks which close settles it.
         for path in signals_created:
-            with open(path, encoding="utf-8") as fh:
-                emitted = json.load(fh)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    emitted = json.load(fh)
+            except (OSError, ValueError):
+                continue
             entry = rotations.get(emitted.get("pool_address"))
             if (entry and entry.get("status") == "awaiting_close"
                     and emitted.get("action") == "close"):
                 entry["close_signal_id"] = emitted["signal_id"]
+        # Change G: record CLOSE_EMITTED the moment a close signal is
+        # written, so the settlement state machine tracks it from emit time.
+        # A new emit also supersedes that pool's earlier rejected attempts.
+        emitted_closes = record_emitted_closes(args.state_dir, signals_created)
+        if emitted_closes:
+            cs = report.setdefault("close_settlement", {})
+            cs["emitted"] = emitted_closes
         unemitted = _release_unemitted_rotations(
             rotations, cycle_day=_utc_oday())
         rotation_review.extend(unemitted)

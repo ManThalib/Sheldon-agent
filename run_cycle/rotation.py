@@ -17,23 +17,49 @@ def _utc_iso():
 
 
 def _settle_rotations(rotations: dict, active_positions: dict,
-                      close_resolutions: dict, now_ts: float = None) -> list:
+                      close_resolutions: dict, now_ts: float = None,
+                      position_mtime: float = None,
+                      wallet_mtime: float = None,
+                      rotation_policy: dict = None,
+                      max_position_scan_age: float = None) -> list:
     """Advance pending rotation entries and return review items.
 
     Transitions (only entries in ``proposed``/``awaiting_close`` move):
 
       * source position gone from the position scan -> ``settled``
-        (George's close landed on-chain)
+        (George's close landed on-chain). With the Phase 2 rotation policy
+        this additionally requires the absence proof to come from a current
+        position scan (within ``max_position_scan_age``), and — when the
+        close's journal confirmation time is known — a wallet scan newer
+        than that confirmation. A stale scan or an unverified wallet keeps
+        the entry ``awaiting_close``; it can never settle on stale evidence.
       * George journalled the close signal as rejected/failed/failed_verify
         -> ``failed``; the candidate reservation is released because only
         proposed/awaiting_close entries reserve a target
       * pending longer than 7 days -> ``expired`` (a lost close can never
         wedge the reservation forever)
 
+    Note: settling the rotation entry only releases the candidate
+    reservation. The candidate's open is still gated by the full close
+    settlement machine (FUNDS_VERIFIED) plus the Phase 1 readiness gate —
+    settling can never open anything by itself.
+
     Mutates ``rotations`` in place. The returned list feeds the cycle's
     review surface so a human sees a rejected rotation close.
     """
     now_ts = time.time() if now_ts is None else now_ts
+    policy = rotation_policy or {}
+    require_scan = bool(
+        policy.get("require_chain_close_verification", True)
+        or policy.get("require_position_scan_confirmation", True))
+    require_wallet = policy.get("require_wallet_capital_confirmation", True)
+    scan_current = True
+    if require_scan:
+        if not position_mtime:
+            scan_current = False
+        elif (max_position_scan_age is not None
+              and now_ts - position_mtime > max_position_scan_age):
+            scan_current = False
     review = []
     for src_addr, entry in list(rotations.items()):
         if not isinstance(entry, dict):
@@ -42,8 +68,27 @@ def _settle_rotations(rotations: dict, active_positions: dict,
         if entry.get("status") not in ("proposed", "awaiting_close"):
             continue
         if src_addr not in active_positions:
-            entry["status"] = "settled"
-            entry["settled_at"] = _utc_iso()
+            sid = entry.get("close_signal_id")
+            resolution = close_resolutions.get(sid) or {}
+            conf = resolution.get("confirmed_at") or 0.0
+            if not scan_current:
+                entry["settlement_note"] = (
+                    "source absent but position scan not current; "
+                    "settlement deferred")
+            elif require_wallet and conf and (wallet_mtime or 0.0) <= conf:
+                entry["settlement_note"] = (
+                    "source absent but wallet scan predates the close "
+                    "confirmation; settlement deferred")
+            else:
+                entry.pop("settlement_note", None)
+                entry["status"] = "settled"
+                entry["settled_at"] = _utc_iso()
+            # Absent source: the entry either settled or deferred on stale
+            # evidence — never fall through to the rejection branch. A
+            # rejected close whose position is gone is the ambiguous case;
+            # the close settlement machine flags it CLOSE_REVIEW_REQUIRED
+            # and the global open gate blocks. The reservation itself
+            # follows the position evidence, not the failure.
             continue
         sid = entry.get("close_signal_id")
         resolution = close_resolutions.get(sid) or {}

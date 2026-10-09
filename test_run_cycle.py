@@ -97,13 +97,17 @@ class RotationSettlementTests(unittest.TestCase):
 
     def test_settlement_wins_when_source_position_gone(self):
         # George's close landed (source left the scan): settle, even if an
-        # older journal line said rejected.
+        # older journal line said rejected. Phase 2: the settle must be
+        # backed by a current position scan and a wallet scan newer than
+        # the close confirmation.
         rotations = self._rotations(sid="sheldon-rot-4-1")
         review = _settle_rotations(
             rotations, {},
             {"sheldon-rot-4-1": {"status": "rejected",
                                  "confirmed_at": self.NOW}},
-            now_ts=self.NOW)
+            now_ts=self.NOW + 60,
+            position_mtime=self.NOW + 60,
+            wallet_mtime=self.NOW + 60)
         self.assertEqual(rotations["SRC"]["status"], "settled")
         self.assertEqual(review, [])
 

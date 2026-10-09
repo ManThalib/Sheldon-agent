@@ -20,6 +20,7 @@ from run_cycle.rotation import (
     _release_unemitted_rotations,
     _settle_rotations,
 )
+from run_cycle.close_settlement import record_emitted_closes
 from run_cycle.report import (
     append_log as append_log_impl,
     _short_summary as _short_summary_impl,
@@ -184,4 +185,5 @@ __all__ = [
     "_wake_george",
     "_load_rotation_state",
     "_save_rotation_state",
+    "record_emitted_closes",
 ]
