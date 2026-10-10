@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 # Import prep swap signal builder from readiness module
 from readiness import build_prep_swap_signal
 from readiness import prep_ledger
+from readiness import prep_ledger
 
 
 def _utc_iso():
@@ -120,7 +121,8 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                   min_open_score: float = 70.0,
                   min_position_usd: float = 20.0,
                   supported_dexes: set = None,
-                  state_dir: str = None) -> tuple:
+                  state_dir: str = None,
+                  journal_dir: str = None) -> tuple:
     """Convert verdicts into George-schema signal files.
 
     Returns:
@@ -223,6 +225,11 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
         idx += 1
 
     # 2. Position signals.
+    # Bug #6 gate inputs: closes George already executed recently (any
+    # signal_id, incl. manual out-of-band closes Sheldon never saw).
+    _recent = prep_ledger.recently_executed_closes(journal_dir=journal_dir)
+    recent_close_ids = _recent["position_ids"]
+    recent_close_pools = _recent["pool_addrs"]
     for v in report.get("verdicts", []):
         action = v.get("action")
         pool_addr = v.get("pool_address")
@@ -284,6 +291,27 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 })
                 continue
         elif action in {"CLOSE", "REBALANCE", "COLLECT_FEES", "ROTATE"}:
+            # Live-fire bug #6 gate (2026-10-10): never re-emit a close or
+            # claim for a position George already closed recently — the
+            # settlement state can miss a manual/out-of-band close, and the
+            # position scan can lag. A duplicate only produces a failed
+            # "Position not found" dispatch; surface a review item instead.
+            pos_id = str(v.get("position") or "")
+            already_closed = (
+                (pos_id and pos_id in recent_close_ids)
+                or (not pos_id and pool_addr and pool_addr in recent_close_pools)
+            )
+            if already_closed:
+                review.append({
+                    "pool_address": pool_addr,
+                    "dex": dex,
+                    "score": v.get("score"),
+                    "evidence": None,
+                    "reason": (f"{action} suppressed: close already executed in "
+                               f"George's journal for position {pos_id or pool_addr} "
+                               f"within the re-emit window (bug #6 gate)"),
+                })
+                continue
             lower = v.get("lower_bound")
             upper = v.get("upper_bound")
             try:

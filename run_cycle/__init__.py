@@ -60,7 +60,9 @@ def _filter_open_candidates(
             "blackout_dates": p.get("blackout_dates"),
         }
     if allowed_bin_steps is None:
-        allowed_bin_steps = {4, 10, 20, 25, 50, 100}
+        # Miraa request, owner default 2026-10-10 (#34a): bin_step < 10 is
+        # rejected — tight bins are fee-farm bait with hostile ranges.
+        allowed_bin_steps = {10, 20, 25, 50, 100}
     from run_cycle.gates import _filter_open_candidates as _f
     return _f(
         open_candidates, active_positions,
@@ -111,14 +113,16 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                   min_open_score: float = 70.0,
                   min_position_usd: float = 20.0,
                   supported_dexes: set = None,
-                  state_dir: str = None) -> tuple:
+                  state_dir: str = None,
+                  journal_dir: str = None) -> tuple:
     """Backward-compatible wrapper for run_cycle.signals.write_signals."""
     from run_cycle.signals import write_signals as _f
     return _f(report, signals_dir, positions_dir,
               min_open_score=min_open_score,
               min_position_usd=min_position_usd,
               supported_dexes=supported_dexes,
-              state_dir=state_dir)
+              state_dir=state_dir,
+              journal_dir=journal_dir)
 
 
 def append_log(report: dict, memory_dir: str, signals_created: list, review: list):

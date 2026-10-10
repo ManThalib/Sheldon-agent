@@ -1042,3 +1042,121 @@ class RunCycleIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class CloseReemitGateTests(unittest.TestCase):
+    """Bug #6 (live 2026-10-10): Sheldon re-emitted a close for a position
+    George had already closed. The journal-based re-emit gate suppresses
+    duplicate close/claim signals and surfaces a review item instead."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.journal_dir = os.path.join(self.root, "journal")
+        os.makedirs(self.journal_dir, exist_ok=True)
+        self.signals_dir = os.path.join(self.root, "signals")
+        self.pos_dir = os.path.join(self.root, "positions")
+        os.makedirs(self.pos_dir, exist_ok=True)
+        with open(os.path.join(self.pos_dir, "position_scan-x.json"), "w") as fh:
+            json.dump({"positions": []}, fh)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _write_journal(self, records):
+        path = os.path.join(self.journal_dir, "2026-10-10.jsonl")
+        with open(path, "w") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+
+    @staticmethod
+    def _close_record(signal_id, position_id, pool, age_seconds=60.0):
+        ts = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        return {"timestamp_utc": ts.isoformat(), "signal_id": signal_id,
+                "action": "close", "decision": "executed",
+                "pool_address": pool, "position_id": position_id}
+
+    @staticmethod
+    def _close_verdict(position_id, pool):
+        return {"action": "CLOSE", "position": position_id,
+                "pool": "POOL", "pool_address": pool, "dex": "meteora",
+                "score": 10.0, "lower_bound": 0, "upper_bound": 10,
+                "evidence": {}, "reason": "test"}
+
+    def _report(self, verdicts):
+        return {"wallet": {}, "verdicts": verdicts, "open_skipped": [],
+                "strategies": [], "funding": {"funded": [], "unfunded": [],
+                                              "prep_swaps_allowed": [],
+                                              "prep_swaps_blocked": []}}
+
+    def test_recently_executed_closes_parses_journal(self):
+        from readiness import prep_ledger
+        self._write_journal([
+            self._close_record("sig-1", "POS1", "POOLA"),
+            self._close_record("sig-2", "POS2", "POOLB", age_seconds=7 * 3600),
+            {"timestamp_utc": datetime.now(timezone.utc).isoformat(),
+             "signal_id": "sig-3", "action": "close", "decision": "failed",
+             "pool_address": "POOLC", "position_id": "POS3"},
+        ])
+        recent = prep_ledger.recently_executed_closes(journal_dir=self.journal_dir)
+        self.assertIn("POS1", recent["position_ids"])
+        self.assertNotIn("POS2", recent["position_ids"])  # outside window
+        self.assertNotIn("POS3", recent["position_ids"])  # not executed
+        self.assertIn("POOLA", recent["pool_addrs"])
+        self.assertNotIn("POOLC", recent["pool_addrs"])
+
+    def test_close_reemit_suppressed_by_recent_journal_close(self):
+        self._write_journal([self._close_record("sig-live-1", "POSX", "POOLA")])
+        report = self._report([self._close_verdict("POSX", "POOLA")])
+        created, review = write_signals(
+            report, self.signals_dir, self.pos_dir, journal_dir=self.journal_dir)
+        actions = []
+        for path in created:
+            with open(path) as fh:
+                actions.append(json.load(fh)["action"])
+        self.assertNotIn("close", actions)
+        self.assertTrue(any("suppressed" in r.get("reason", "") for r in review))
+
+    def test_unrelated_close_not_suppressed(self):
+        self._write_journal([self._close_record("sig-live-1", "POSX", "POOLA")])
+        report = self._report([self._close_verdict("POSY", "POOLB")])
+        created, review = write_signals(
+            report, self.signals_dir, self.pos_dir, journal_dir=self.journal_dir)
+        actions = []
+        for path in created:
+            with open(path) as fh:
+                actions.append(json.load(fh)["action"])
+        self.assertIn("close", actions)
+        self.assertFalse(any("suppressed" in r.get("reason", "") for r in review))
+
+    def test_claim_suppressed_for_closed_position(self):
+        self._write_journal([self._close_record("sig-live-1", "POSX", "POOLA")])
+        verdict = self._close_verdict("POSX", "POOLA")
+        verdict["action"] = "COLLECT_FEES"
+        report = self._report([verdict])
+        created, review = write_signals(
+            report, self.signals_dir, self.pos_dir, journal_dir=self.journal_dir)
+        actions = []
+        for path in created:
+            with open(path) as fh:
+                actions.append(json.load(fh)["action"])
+        self.assertNotIn("claim_fees", actions)
+
+    def test_resolve_entry_marks_manual(self):
+        from run_cycle.close_settlement import resolve_entry, load_close_state
+        state_dir = os.path.join(self.root, "state")
+        os.makedirs(state_dir, exist_ok=True)
+        from run_cycle.close_settlement import save_close_state, CLOSE_STATE_FILENAME
+        save_close_state(state_dir, {"sig-stuck": {
+            "status": "CLOSE_UNKNOWN_TIMEOUT", "pool_address": "POOLA"}})
+        rc = resolve_entry(state_dir, "sig-stuck", note="verified closed on-chain")
+        self.assertEqual(rc, 0)
+        entry = load_close_state(state_dir)["sig-stuck"]
+        self.assertEqual(entry["status"], "CLOSE_RESOLVED")
+        self.assertTrue(entry["manual"])
+        self.assertIn("on-chain", entry["note"])
+        # already-settled is a no-op success
+        rc2 = resolve_entry(state_dir, "sig-stuck")
+        self.assertEqual(rc2, 0)
+        # unknown id -> exit 1
+        rc3 = resolve_entry(state_dir, "sig-never-existed")
+        self.assertEqual(rc3, 1)

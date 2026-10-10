@@ -383,6 +383,29 @@ def advance(state: Dict[str, Dict[str, Any]],
     return state
 
 
+def resolve_entry(state_dir: str, signal_id: str, note: str = "") -> int:
+    """Mark one close-settlement entry CLOSE_RESOLVED (manual:true).
+
+    Owner-approved 2026-10-10 (plan question #19): supersedes the
+    edit-the-JSON-only design. Returns a process exit code.
+    """
+    state = load_close_state(state_dir)
+    entry = state.get(signal_id)
+    if not isinstance(entry, dict):
+        print(f"NO SETTLEMENT ENTRY for {signal_id}; nothing to resolve")
+        return 1
+    if entry.get("status") in ("FUNDS_VERIFIED", "CLOSE_RESOLVED"):
+        print(f"{signal_id} already settled ({entry.get('status')})")
+        return 0
+    entry["status"] = "CLOSE_RESOLVED"
+    entry["manual"] = True
+    entry["note"] = note or "resolved via --resolve-close"
+    entry["resolved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_close_state(state_dir, state)
+    print(f"RESOLVED {signal_id} -> CLOSE_RESOLVED (manual)")
+    return 0
+
+
 def prune_settled(state: Dict[str, Dict[str, Any]], now: float = None,
                   max_age_seconds: float = 30 * 24 * 3600
                   ) -> Dict[str, Dict[str, Any]]:

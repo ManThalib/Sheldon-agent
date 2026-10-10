@@ -208,6 +208,55 @@ def read_journal(journal_dir: Optional[str] = None,
     return out
 
 
+def recently_executed_closes(journal_dir: Optional[str] = None,
+                             within_seconds: float = 6 * 3600,
+                             now: Optional[float] = None,
+                             ) -> Dict[str, Set[str]]:
+    """Position ids / pool addresses with a journal-executed close recently.
+
+    Live-fire bug #6 (2026-10-10): Sheldon re-emitted a close for a position
+    George had already closed manually — the settlement state never saw the
+    manual close, and the position scan still listed it. Before writing a
+    close/claim signal, callers gate on this: a position whose close already
+    executed in George's journal within the window gets a review item, not a
+    duplicate signal.
+
+    Returns {"position_ids": set, "pool_addrs": set}.
+    """
+    journal_dir = journal_dir or DEFAULT_JOURNAL_DIR
+    now = time.time() if now is None else now
+    ids: Set[str] = set()
+    pools: Set[str] = set()
+    for path in sorted(glob.glob(os.path.join(journal_dir, "*.jsonl"))):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (rec.get("decision") or rec.get("status")) != "executed":
+                        continue
+                    if (rec.get("action") or "") != "close":
+                        continue
+                    ts = _created_epoch(rec.get("timestamp_utc")
+                                        or rec.get("timestamp") or "")
+                    if ts and now - ts > within_seconds:
+                        continue
+                    pid = str(rec.get("position_id") or "")
+                    if pid:
+                        ids.add(pid)
+                    pool = str(rec.get("pool_address") or "")
+                    if pool:
+                        pools.add(pool)
+        except OSError:
+            continue
+    return {"position_ids": ids, "pool_addrs": pools}
+
+
 def resolve(ledger: Dict[str, Any],
             journal_dir: Optional[str] = None) -> bool:
     """Apply journal outcomes to pending ledger entries. Returns True if changed."""

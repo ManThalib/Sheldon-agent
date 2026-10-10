@@ -123,6 +123,16 @@ from run_cycle.close_settlement import (  # noqa: E402
 
 
 
+def resolve_close_entry(state_dir: str, signal_id: str, note: str = "") -> int:
+    """Mark one close-settlement entry CLOSE_RESOLVED (manual:true).
+
+    Owner-approved 2026-10-10 (plan question #19): supersedes the
+    edit-the-JSON-only design. Returns a process exit code.
+    """
+    from run_cycle.close_settlement import resolve_entry
+    return resolve_entry(state_dir, signal_id, note)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Sheldon deterministic cycle runner")
     ap.add_argument("--pools-dir", default="/data/missy-data/pool_screens")
@@ -135,7 +145,19 @@ def main() -> int:
         os.path.dirname(os.path.abspath(__file__)), "state"))
     ap.add_argument("--json", action="store_true", help="print full JSON report to stdout")
     ap.add_argument("--max-age-seconds", type=float, default=3900.0)
+    ap.add_argument("--resolve-close", metavar="SIGNAL_ID",
+                    help="mark one close-settlement entry CLOSE_RESOLVED "
+                         "(manual:true) and exit without running a cycle; "
+                         "combine with --resolve-note. Owner-approved "
+                         "2026-10-10 (plan question #19) — supersedes the "
+                         "edit-the-JSON-only design.")
+    ap.add_argument("--resolve-note", default="",
+                    help="human note recorded with --resolve-close")
     args = ap.parse_args()
+
+    if args.resolve_close:
+        return resolve_close_entry(args.state_dir, args.resolve_close,
+                                   args.resolve_note)
 
     try:
         report = lp_scoring.run_cycle(
