@@ -84,8 +84,8 @@
     "max_position_scan_age_seconds": 900
   },
   "sol": {
-    "_comment": "Phase 1 (2026-10-09): real rent/fee/reserve model replacing the 0.02 SOL spend cap. per_dex rent values are PLACEHOLDERS pending live calibration (host-only, 06-host-only-work.md item 5).",
-    "reserve_lamports": 20000000,
+    "_comment": "Phase 1 (2026-10-09): real rent/fee/reserve model. reserve_lamports 20M -> 60M (owner default 2026-10-10, bug #5): must cover George's worst-case open SOL overhead (meteora 60M, calibrated from the 2026-10-10 live-fire opens) so a dust sweep never starves the next open.",
+    "reserve_lamports": 60000000,
     "auto_top_up_enabled": true,
     "auto_top_up_source_mint": "USDC",
     "max_top_up_usd": 10,
