@@ -1,0 +1,56 @@
+{
+  "sheldon-1791619654-4": {
+    "action": "close",
+    "emit_time": 1791619654.0063365,
+    "journal_decision": "failed",
+    "pool_address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN not found', 'error_name': 'Error'}",
+    "rejected_at": 1791619656.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  },
+  "sheldon-1791619654-5": {
+    "action": "close",
+    "emit_time": 1791619654.0063696,
+    "journal_decision": "failed",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r', 'error_name': 'Error'}",
+    "rejected_at": 1791619657.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  },
+  "sheldon-1791619666-3": {
+    "action": "close",
+    "emit_time": 1791619666.2432442,
+    "journal_decision": "failed",
+    "pool_address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN not found', 'error_name': 'Error'}",
+    "rejected_at": 1791619667.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  },
+  "sheldon-1791619666-4": {
+    "action": "close",
+    "emit_time": 1791619666.2432723,
+    "journal_decision": "failed",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r', 'error_name': 'Error'}",
+    "rejected_at": 1791619668.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  },
+  "sheldon-1791619807-1": {
+    "action": "close",
+    "emit_time": 1791619807.9692001,
+    "journal_decision": "failed",
+    "pool_address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN not found', 'error_name': 'Error'}",
+    "rejected_at": 1791619810.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  },
+  "sheldon-1791619807-2": {
+    "action": "close",
+    "emit_time": 1791619807.9692464,
+    "journal_decision": "failed",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r', 'error_name': 'Error'}",
+    "rejected_at": 1791619810.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  }
+}
