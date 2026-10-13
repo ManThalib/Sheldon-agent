@@ -54,7 +54,8 @@ python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N] \
   - `synthetic_pnl.py` — synthetic PnL computation
 - `strategy/` — sizing and adaptive ranges from `sheldon_policy.json`
 - `capital.py` — wallet scan loader: idle USDC, dust assets
-- `range_state.py` — out-of-range grace: CLOSE/REBALANCE deferred 1 run
+- `range_state.py` — out-of-range close rail: full-right closes at once,
+  full-left deferred to 2 consecutive verified runs
 - `idle_sweep.py` — idle-capital sweep into best tracked position
 - `tuner.py` — out-of-sample weight search over historical PnL
 - `profiles.json` / `profiles.tuned.json` — scoring profiles and tuned outputs
@@ -155,8 +156,8 @@ modules.
   `MIN_PREP_SWAP_USD=1.0`, `SELL_SURPLUS_MIN_USD=2.0`,
   `MAX_PREP_SWAPS_PER_MINT_PER_HOUR=3`, `PREP_CONFIRM_GRACE_SECONDS=60`,
   `MAX_WALLET_SCAN_AGE_SECONDS=180`
-- `range_state.py`: `ALLOWED_OUT_OF_RANGE_RUNS=2` (run 1 downgrades
-  CLOSE/REBALANCE to HOLD, run 2 lets it through)
+- `range_state.py`: `ALLOWED_OUT_OF_RANGE_RUNS=2` (full-right OOR closes
+  immediately; full-left OOR closes on run 2; unknown data never closes)
 - `idle_sweep.py`: `RESERVATION_MAX_AGE_SECONDS=3600`, floor-score epsilon 0.01
   below `min_open_score` so opens always outrank sweeps
 

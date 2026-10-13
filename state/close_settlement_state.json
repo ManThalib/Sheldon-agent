@@ -68,13 +68,13 @@
   "sheldon-1791762305-3": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791792878.4478145,
+    "chain_verified_at": 1791870349.9251454,
     "confirmed_at": 1791762332.0,
     "emit_time": 1791762305.3186479,
-    "funds_verified_at": 1791792878.4478145,
+    "funds_verified_at": 1791870349.9251454,
     "journal_decision": "executed",
     "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
-    "position_scan_verified_at": 1791792878.4478145,
+    "position_scan_verified_at": 1791870349.9251454,
     "status": "FUNDS_VERIFIED"
   },
   "sheldon-1791762338-2": {
@@ -89,13 +89,49 @@
   "sheldon-1791769508-1": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791792878.4478145,
+    "chain_verified_at": 1791870349.9251454,
     "confirmed_at": 1791769554.0,
     "emit_time": 1791769508.2432737,
-    "funds_verified_at": 1791792878.4478145,
+    "funds_verified_at": 1791870349.9251454,
     "journal_decision": "executed",
     "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
-    "position_scan_verified_at": 1791792878.4478145,
+    "position_scan_verified_at": 1791870349.9251454,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791827108-1": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791870349.9251454,
+    "confirmed_at": 1791827131.0,
+    "emit_time": 1791827108.3737948,
+    "funds_verified_at": 1791870349.9251454,
+    "journal_decision": "executed",
+    "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "position_scan_verified_at": 1791870349.9251454,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791827108-2": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791870349.9251454,
+    "confirmed_at": 1791827157.0,
+    "emit_time": 1791827108.3738284,
+    "funds_verified_at": 1791870349.9251454,
+    "journal_decision": "executed",
+    "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "position_scan_verified_at": 1791870349.9251454,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791870312-1": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791870349.9251454,
+    "confirmed_at": 1791870338.0,
+    "emit_time": 1791870312.988992,
+    "funds_verified_at": 1791870349.9251454,
+    "journal_decision": "executed",
+    "pool_address": "3potGhhaNyzvCNq1CGh2wLbZLLMjpdPtG1Hpj8q2DDVR",
+    "position_scan_verified_at": 1791870349.9251454,
     "status": "FUNDS_VERIFIED"
   }
 }

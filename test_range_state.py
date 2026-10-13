@@ -56,7 +56,7 @@ class OutOfRangeDetectionTests(unittest.TestCase):
         # A verifiable out-of-range flag carries decoded bounds; a bare
         # false flag (no bounds fields) is a fallback record shape and
         # treated like unknown data below.
-        self.assertTrue(range_state.position_out_of_range(
+        self.assertFalse(range_state.position_out_of_range(
             {"in_range": False, "lower_bound": -100, "upper_bound": 100}))
         self.assertFalse(range_state.position_out_of_range(
             {"in_range": True, "lower_bound": -100, "upper_bound": 100}))
@@ -74,6 +74,43 @@ class OutOfRangeDetectionTests(unittest.TestCase):
         self.assertFalse(range_state.position_out_of_range({}))
         self.assertFalse(range_state.position_out_of_range(
             {"lower_price": 1.0, "upper_price": "junk", "current_price": 0.5}))
+
+    def test_classifies_left_and_right(self):
+        self.assertEqual(range_state.classify_oor_side(_oor_position()), "left")
+        right = _oor_position()
+        right["current_price"] = 115.0
+        self.assertEqual(range_state.classify_oor_side(right), "right")
+        self.assertEqual(range_state.classify_oor_side(_oor_position(oor=False)), "inside")
+
+    def test_zero_bounds_are_unknown(self):
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_price": 0, "upper_price": 0, "current_price": 1,
+            "in_range": False}), "unknown")
+
+    def test_mis_scaled_bounds_are_unknown_not_a_side(self):
+        # 2026-10-11/12 scanner rows emitted bounds ~228x the live price.
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_price": 9.968, "upper_price": 10.072,
+            "current_price": 0.0438, "in_range": False}), "unknown")
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_price": 0.0004, "upper_price": 0.0005,
+            "current_price": 0.0438, "in_range": False}), "unknown")
+
+    def test_wide_decoded_bin_range_is_unknown(self):
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_bound": -5000, "upper_bound": 9000,
+            "current_bin_id": 12000}), "unknown")
+
+    def test_bin_side_classification(self):
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_bound": 13570, "upper_bound": 13596,
+            "current_bin_id": 13631}), "right")
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_bound": 13570, "upper_bound": 13596,
+            "current_bin_id": 13540}), "left")
+        self.assertEqual(range_state.classify_oor_side({
+            "lower_bound": 13570, "upper_bound": 13596,
+            "current_bin_id": 13570}), "inside")
 
 
 class CounterTests(unittest.TestCase):
@@ -102,8 +139,10 @@ class CounterTests(unittest.TestCase):
     def test_state_file_roundtrip_and_junk_recovery(self):
         root = tempfile.mkdtemp()
         try:
-            range_state.save_range_state({"POOL1": 2}, root)
-            self.assertEqual(range_state.load_range_state(root), {"POOL1": 2})
+            range_state.save_range_state(
+                {"POOL1": {"side": "left", "consecutive_runs": 2}}, root)
+            self.assertEqual(
+                range_state.load_range_state(root)["POOL1"]["consecutive_runs"], 2)
             with open(range_state.state_path(root), "w") as fh:
                 fh.write("{not json")
             self.assertEqual(range_state.load_range_state(root), {})
@@ -122,17 +161,53 @@ class GraceVerdictTests(unittest.TestCase):
         self.assertIn("grace", out["reason"])
         self.assertIn("1/2", out["reason"])
 
-    def test_second_oor_run_allows_close(self):
-        counts = {"POOL1": 2}
+    def test_second_left_oor_run_allows_close(self):
+        state = {"POOL1": {"side": "left", "consecutive_runs": 2}}
         out = range_state.out_of_range_position_verdict(
-            _close_verdict(), counts)
+            _close_verdict(), state)
         self.assertEqual(out["action"], "CLOSE")
 
-    def test_second_oor_run_allows_rebalance(self):
-        counts = {"POOL1": 2}
+    def test_second_left_oor_run_closes_from_hold(self):
+        """Run two of a verified full-left OOR is an explicit exit."""
+        state = {"POOL1": {"side": "left", "consecutive_runs": 2}}
         out = range_state.out_of_range_position_verdict(
-            _close_verdict(action="REBALANCE"), counts)
-        self.assertEqual(out["action"], "REBALANCE")
+            _close_verdict(action="HOLD"), state)
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertTrue(out["oor_close_eligible"])
+        self.assertIn("full-left", out["reason"])
+
+    def test_right_oor_closes_immediately_even_from_hold(self):
+        state = {"POOL1": {"side": "right", "consecutive_runs": 1}}
+        out = range_state.out_of_range_position_verdict(
+            _close_verdict(action="HOLD"), state)
+        self.assertEqual(out["action"], "CLOSE")
+        self.assertTrue(out["oor_close_eligible"])
+
+    def test_first_left_oor_defers_hold(self):
+        state = {"POOL1": {"side": "left", "consecutive_runs": 1}}
+        out = range_state.out_of_range_position_verdict(
+            _close_verdict(action="HOLD"), state)
+        self.assertEqual(out["action"], "HOLD")
+        self.assertFalse(out["oor_close_eligible"])
+
+    def test_side_change_restarts_counter(self):
+        state = {"POOL1": {"side": "right", "consecutive_runs": 8}}
+        updated = range_state.update_out_of_range_state(
+            [{**_oor_position(), "current_price": 115.0}], state)
+        self.assertEqual(updated["POOL1"]["side"], "right")
+        self.assertEqual(updated["POOL1"]["consecutive_runs"], 9)
+        updated = range_state.update_out_of_range_state(
+            [_oor_position()], updated)
+        self.assertEqual(updated["POOL1"]["side"], "left")
+        self.assertEqual(updated["POOL1"]["consecutive_runs"], 1)
+
+    def test_second_oor_run_allows_rebalance(self):
+        # A close-equivalent verdict passes as a plain CLOSE once the rail is
+        # satisfied; the OOR rail never re-opens (no REBALANCE).
+        state = {"POOL1": {"side": "left", "consecutive_runs": 2}}
+        out = range_state.out_of_range_position_verdict(
+            _close_verdict(action="REBALANCE"), state)
+        self.assertEqual(out["action"], "CLOSE")
 
     def test_in_range_close_passes_immediately(self):
         # Policy close on an in-range position: no counter, no deferral.
@@ -227,6 +302,32 @@ class RunCycleGraceIntegrationTests(unittest.TestCase):
             range_state.out_of_range_position_verdict(v, counts)
             for v in report["verdicts"]]
         self.assertEqual(report["verdicts"][0]["action"], "HOLD")
+
+    def test_right_side_oor_writes_close_signal_from_hold(self):
+        """Full-right OOR promotes a HOLD to a close signal immediately."""
+        right = {**_oor_position(), "current_price": 115.0}
+        state = range_state.update_out_of_range_state([right], {})
+        self.assertEqual(state["POOL1"]["side"], "right")
+        report = self._report()
+        report["verdicts"] = [
+            range_state.out_of_range_position_verdict(
+                _close_verdict(action="HOLD"), state)]
+        self.assertEqual(report["verdicts"][0]["action"], "CLOSE")
+        created, _review = write_signals(report, self.signals_dir, self.root)
+        actions = [json.load(open(p))["action"] for p in created]
+        self.assertIn("close", actions)
+
+    def test_malformed_bounds_never_close(self):
+        bad = {**_oor_position(), "lower_price": 0.0, "upper_price": 0.0,
+               "current_price": 0.0, "lower_bound": None, "upper_bound": None}
+        state = range_state.update_out_of_range_state([bad], {})
+        self.assertEqual(state, {})
+        report = self._report()
+        report["verdicts"] = [
+            range_state.out_of_range_position_verdict(
+                _close_verdict(action="HOLD"), state)]
+        created, _review = write_signals(report, self.signals_dir, self.root)
+        self.assertEqual(created, [])
 
 
 if __name__ == "__main__":

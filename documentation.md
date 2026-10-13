@@ -311,10 +311,13 @@ No `SHELDON_IDLE_USDC` env var, no `wallet_balances.json` cache, no RPC lookup.
   `MIN_PREP_SWAP_USD=1.0`, `SELL_SURPLUS_MIN_USD=2.0`,
   `MAX_PREP_SWAPS_PER_MINT_PER_HOUR=3`, `PREP_CONFIRM_GRACE_SECONDS=60`,
   `MAX_WALLET_SCAN_AGE_SECONDS=180`.
-- `range_state.py`: `position_out_of_range` (price bounds, else `in_range` flag;
-  unknown = in-range), `update_out_of_range_counts`,
-  `out_of_range_position_verdict` (CLOSE/REBALANCE → HOLD on runs 1..`ALLOWED_OUT_OF_RANGE_RUNS-1=1`),
-  `state/out_of_range.json`.
+- `range_state.py`: `classify_oor_side` (price bounds, else decoded
+  bin/tick bounds; zero/absent/inverted bounds = unknown, never a side),
+  `update_out_of_range_state` (side-aware counters),
+  `out_of_range_position_verdict` (full-right OOR closes immediately; full-left
+  OOR closes from run `ALLOWED_OUT_OF_RANGE_RUNS=2`; unknown data never closes),
+  `state/out_of_range.json` (v2 `positions` map; legacy `out_of_range_counts`
+  is read as a left-side counter).
 - `idle_sweep.py`: `plan_sweep`/`execute_sweep`, `load_add_state`,
   `state/add_state.json`, `RESERVATION_MAX_AGE_SECONDS=3600`,
   floor-score epsilon 0.01 below `min_open_score`.

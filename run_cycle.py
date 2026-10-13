@@ -192,26 +192,41 @@ def main() -> int:
         position_mtime = 0.0
     raw_wallet = load_raw_wallet(args.wallet_scans_dir)
 
-    # Out-of-range grace (Mr. Man rail): a position that leaves its range
-    # must survive ALLOWED_OUT_OF_RANGE_RUNS consecutive runs before a
-    # CLOSE/REBALANCE verdict passes. Run 1 downgrades the verdict to HOLD
-    # with a review reason (no close signal); run 2 lets it through.
-    # Back in range resets the counter.
-    grace_counts = range_state.update_out_of_range_counts(
+    # Out-of-range side policy (Mr. Man, 2026-10-13):
+    #   full-right OOR (price/bin above the range)  -> close immediately;
+    #   full-left  OOR (price/bin below the range)  -> close after two
+    #                                                 consecutive verified runs.
+    # Unknown or malformed range data never counts and never closes. The
+    # state is side-aware, so switching sides restarts the counter, and an
+    # in-range run drops the record.
+    oor_state = range_state.update_out_of_range_state(
         list(active_positions.values()),
         range_state.load_range_state(args.state_dir),
     )
-    range_state.save_range_state(grace_counts, args.state_dir)
+    range_state.save_range_state(oor_state, args.state_dir)
     report["verdicts"] = [
-        range_state.out_of_range_position_verdict(v, grace_counts)
+        range_state.out_of_range_position_verdict(v, oor_state)
         for v in report.get("verdicts", [])
     ]
     report["out_of_range_grace"] = {
         "allowed_runs": range_state.ALLOWED_OUT_OF_RANGE_RUNS,
+        "right_closes_immediately": True,
         "deferred_positions": sorted(
-            addr for addr, n in grace_counts.items()
-            if n < range_state.ALLOWED_OUT_OF_RANGE_RUNS
+            addr for addr, rec in oor_state.items()
+            if rec.get("side") == "left"
+            and rec.get("consecutive_runs", 0) < range_state.ALLOWED_OUT_OF_RANGE_RUNS
         ),
+        "positions": {
+            addr: {
+                "side": rec.get("side"),
+                "consecutive_runs": rec.get("consecutive_runs"),
+                "close_eligible": (
+                    rec.get("side") == "right"
+                    or rec.get("consecutive_runs", 0) >= range_state.ALLOWED_OUT_OF_RANGE_RUNS
+                ),
+            }
+            for addr, rec in sorted(oor_state.items())
+        },
     }
 
     # ----- Rotation detection ------------------------------------------------
@@ -399,7 +414,7 @@ def main() -> int:
             )
 
     report["verdicts"] = [
-        range_state.out_of_range_position_verdict(v, grace_counts)
+        range_state.out_of_range_position_verdict(v, oor_state)
         for v in report.get("verdicts", [])
     ]
 

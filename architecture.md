@@ -26,8 +26,9 @@ consists of these modules:
    - `funding.py` — funding plan builder
    - `prep_swap_gates.py` — swap gating (rescan wait + hourly loop guards)
    - `prep_swap.py` — build George-schema swap signals
-7. **`range_state.py`** — Out-of-range grace (`state/out_of_range.json`,
-   `ALLOWED_OUT_OF_RANGE_RUNS=2`)
+7. **`range_state.py`** — Side-aware out-of-range close rail
+   (`state/out_of_range.json`, `ALLOWED_OUT_OF_RANGE_RUNS=2`; right = immediate,
+   left = two verified runs)
 8. **`idle_sweep.py`** — Idle-capital sweep into the best tracked position
    (`add_liquidity`, `state/add_state.json`)
 9. **`tuner.py`** — Out-of-sample weight search over historical PnL (writes
@@ -64,9 +65,12 @@ Tests: `python3 -m unittest discover` or individually:
    unknown component caps the verdict at REVIEW. Policy CLOSE
    (off-universe/unknown pair) is exempt and always CLOSE. With enough data,
    expected-PnL can override the score-based verdict.
-6. **Out-of-range grace**: `range_state.py` counts consecutive out-of-range runs
-   per pool (`state/out_of_range.json`). Run 1 downgrades CLOSE/REBALANCE to
-   HOLD; run 2 lets it through; back-in-range resets.
+6. **Out-of-range close rail**: `range_state.py` classifies each live position
+   as full-right (price/bin above the range), full-left (below), inside, or
+   unknown, and counts consecutive verified runs per pool
+   (`state/out_of_range.json`). Full-right closes immediately (promoting HOLD
+   to CLOSE); full-left closes on run 2; inside/unknown resets and never
+   closes. Switching sides restarts the counter.
 7. **Open filtering + strategies**: `_filter_open_candidates` drops dedup/
    duplicate/center-unknown/out-of-window/policy-gated/bin-step-violating
    candidates; `strategy.build_strategies` ranks survivors by score (top

@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Out-of-range grace state for open LP positions.
+"""Persistent out-of-range side state and close policy.
 
-Policy (Mr. Man, 2026-09-29): a position that leaves its range must survive
-TWO consecutive automation runs before Sheldon emits a close. The first
-out-of-range run downgrades the CLOSE/REBALANCE verdict to HOLD with a
-review reason (no close signal); the second consecutive out-of-range run
-lets the verdict pass. Returning in range resets the counter.
+Policy:
+- full-right OOR (current price/bin above the upper bound): close immediately;
+- full-left OOR (current price/bin below the lower bound): close after two
+  consecutive verified runs;
+- in-range or unknown/malformed data: reset/do not count.
 
-The counter is keyed by pool address (Sheldon enforces one open position
-per pool, so pool and position address are 1:1) and kept in a tiny JSON
-state file under scoring/state/. It is derived from the raw Missy position
-records (lower_price/upper_price/current_price, or Missy's in_range flag)
-— not from scored components, so it does not depend on scoring weights.
-
-Missing or malformed state fails safe to "no runs counted yet": the worst
-case is one extra grace run, never an early close.
+The state file remains backward compatible with the historical
+``out_of_range_counts`` mapping.
 """
 
 import json
 import os
 
-# Grace policy: consecutive out-of-range runs that must be observed before
-# a close passes. 2 means: run 1 holds, run 2 closes.
 ALLOWED_OUT_OF_RANGE_RUNS = 2
-
 STATE_FILENAME = "out_of_range.json"
+
+# Malformed-bound guard: a live price more than this many times outside a
+# decoded bound is a scanner scale/decoding fault, not a real excursion (a
+# Meteora range is at most ~70 bins wide, i.e. well under 2x). Such rows are
+# treated as unknown so bad data can never trigger a close.
+MAX_PRICE_SCALE_RATIO = 10.0
+# A Meteora init tx can create only ~70 bins, so a wider decoded range is
+# invalid geometry (matches the builder's MAX_METEORA_RANGE_WIDTH clamp).
+MAX_RANGE_BINS = 200
 
 
 def state_path(state_dir: str = None) -> str:
@@ -33,32 +33,121 @@ def state_path(state_dir: str = None) -> str:
     return os.path.join(state_dir, STATE_FILENAME)
 
 
+def _valid_number(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    # Zero is a common scanner unknown sentinel for prices/bins.
+    return value if value != 0 else None
+
+
+def classify_oor_side(pos: dict):
+    """Return ``right``, ``left``, ``inside``, or ``unknown``.
+
+    Prefer normalized price bounds, then decoded integer/bin bounds. A bare
+    ``in_range=false`` is never enough to infer a side. This prevents a
+    malformed or mis-scaled scanner row from triggering a close.
+    """
+    lower = _valid_number(pos.get("lower_price"))
+    upper = _valid_number(pos.get("upper_price"))
+    current = _valid_number(pos.get("current_price"))
+    if lower is not None and upper is not None and current is not None:
+        if upper <= lower:
+            return "unknown"
+        if not _scale_plausible(lower, upper, current):
+            return "unknown"
+        if current > upper:
+            return "right"
+        if current < lower:
+            return "left"
+        return "inside"
+
+    lower = _valid_number(pos.get("lower_bound"))
+    upper = _valid_number(pos.get("upper_bound"))
+    current = _valid_number(
+        pos.get("current_bin_id") if pos.get("current_bin_id") is not None
+        else pos.get("current_tick_index")
+    )
+    if lower is not None and upper is not None and current is not None:
+        if upper <= lower or (upper - lower) > MAX_RANGE_BINS:
+            return "unknown"
+        if current > upper:
+            return "right"
+        if current < lower:
+            return "left"
+        return "inside"
+    return "unknown"
+
+
+def _scale_plausible(lower: float, upper: float, current: float) -> bool:
+    """Reject bound/current sets that differ by more than a plausible factor."""
+    if lower <= 0 or upper <= 0 or current <= 0:
+        return False
+    ratio = max(upper / current, current / lower)
+    return ratio <= MAX_PRICE_SCALE_RATIO
+
+
+def position_out_of_range(pos: dict) -> bool:
+    return classify_oor_side(pos) in ("left", "right")
+
+
 def load_range_state(state_dir: str = None) -> dict:
-    """Load out-of-range counters: {pool_address: consecutive_runs}. Missing,
-    malformed, or junk entries yield an empty dict."""
+    """Load normalized state records.
+
+    Historical ``{out_of_range_counts: {pool: n}}`` is converted to left-side
+    records conservatively. The next verified scan replaces the side.
+    """
     try:
         with open(state_path(state_dir), "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return {}
-    counts = data.get("out_of_range_counts") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    records = data.get("positions")
+    if isinstance(records, dict):
+        out = {}
+        for addr, rec in records.items():
+            if not isinstance(rec, dict):
+                continue
+            try:
+                n = int(rec.get("consecutive_runs", 0))
+            except (TypeError, ValueError):
+                continue
+            if n > 0 and rec.get("side") in ("left", "right"):
+                item = dict(rec)
+                item["consecutive_runs"] = n
+                out[str(addr)] = item
+        return out
+    # Compatibility with the old pool->count format. Do not treat it as a
+    # right-side count: right-side immediate close must be newly verified.
+    counts = data.get("out_of_range_counts")
     if not isinstance(counts, dict):
         return {}
     return {
-        str(addr): int(n) for addr, n in counts.items()
+        str(addr): {"pool_address": str(addr), "side": "left",
+                    "consecutive_runs": int(n)}
+        for addr, n in counts.items()
         if isinstance(n, (int, float)) and n > 0
     }
 
 
-def save_range_state(counts: dict, state_dir: str = None) -> None:
-    """Persist counters atomically. Failures are swallowed: an unwritable
-    state file must not fail the scoring cycle."""
+def save_range_state(state: dict, state_dir: str = None) -> None:
     try:
         path = state_path(state_dir)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        payload = {
-            "out_of_range_counts": {str(k): int(v) for k, v in (counts or {}).items()},
-        }
+        positions = {}
+        for addr, rec in (state or {}).items():
+            if isinstance(rec, (int, float)) and not isinstance(rec, bool):
+                # Legacy pool->count callers: treat as a left-side counter.
+                rec = {"side": "left", "consecutive_runs": int(rec)}
+            if isinstance(rec, dict) and rec.get("side") in ("left", "right"):
+                item = dict(rec)
+                item["consecutive_runs"] = int(item.get("consecutive_runs", 0))
+                if item["consecutive_runs"] > 0:
+                    positions[str(addr)] = item
+        payload = {"version": 2, "positions": positions}
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
@@ -68,88 +157,87 @@ def save_range_state(counts: dict, state_dir: str = None) -> None:
         pass
 
 
-def position_out_of_range(pos: dict) -> bool:
-    """True when the raw position record is verifiably out of range.
-
-    Uses explicit price bounds when present; falls back to Missy's
-    in_range flag. Unknown bounds and flag count as in-range (never punish
-    a position on absent data — missing data caps verdicts at REVIEW
-    elsewhere anyway).
-    """
-    lower = pos.get("lower_price")
-    upper = pos.get("upper_price")
-    current = pos.get("current_price")
-    if lower is not None and upper is not None and current is not None:
-        try:
-            lower = float(lower)
-            upper = float(upper)
-            current = float(current)
-        except (TypeError, ValueError):
-            return False
-        if upper > lower:
-            return not (lower <= current <= upper)
-        return False  # degenerate bounds: treat as unknown => in-range
-    if pos.get("in_range") is False and (
-        pos.get("lower_bound") is None or pos.get("upper_bound") is None
-    ):
-        # Fallback/historical record with undecodable tick bounds: not
-        # verifiably out of range, so never start the grace counter on it.
-        return False
-    return pos.get("in_range") is False
-
-
-def update_out_of_range_counts(positions: list, counts: dict) -> dict:
-    """Update counters from this run's raw position records.
-
-    Out-of-range positions increment (first observation starts at 1);
-    in-range positions are removed. Returns a new dict containing only
-    currently out-of-range positions.
-    """
-    updated = dict(counts or {})
-    tracked = set()
+def update_out_of_range_state(positions: list, previous: dict) -> dict:
+    """Update side-aware counters from verified raw position records."""
+    updated = {}
     for pos in positions or []:
-        addr = pos.get("pool_address")
-        if not addr:
+        pool = pos.get("pool_address")
+        if not pool:
             continue
-        if position_out_of_range(pos):
-            updated[str(addr)] = int(updated.get(str(addr), 0)) + 1
-            tracked.add(str(addr))
-        else:
-            updated.pop(str(addr), None)
-    # Drop counters for positions that vanished from the scan (closed or
-    # unscanned): no live record, nothing to keep grace for.
-    for addr in list(updated.keys()):
-        if addr not in tracked:
-            updated.pop(addr, None)
+        side = classify_oor_side(pos)
+        if side not in ("left", "right"):
+            continue
+        key = str(pool)
+        old = (previous or {}).get(key) or {}
+        old_side = old.get("side") if isinstance(old, dict) else "left"
+        runs = int(old.get("consecutive_runs", 0)) if old_side == side else 0
+        updated[key] = {
+            "pool_address": key,
+            "position_address": pos.get("position_address") or pos.get("position_id"),
+            "side": side,
+            "consecutive_runs": runs + 1,
+        }
     return updated
 
 
-def out_of_range_position_verdict(s: dict, counts: dict,
-                                  allowed: int = ALLOWED_OUT_OF_RANGE_RUNS) -> dict:
-    """Apply the grace policy to one verdict dict.
+def update_out_of_range_counts(positions: list, counts: dict) -> dict:
+    """Legacy pool->count API retained for callers/tests."""
+    previous = {}
+    for addr, n in (counts or {}).items():
+        if isinstance(n, dict):
+            previous[str(addr)] = n
+        else:
+            previous[str(addr)] = {"side": "left", "consecutive_runs": int(n)}
+    state = update_out_of_range_state(positions, previous)
+    return {addr: rec["consecutive_runs"] for addr, rec in state.items()}
 
-    CLOSE/REBALANCE on a position with 1..allowed-1 consecutive
-    out-of-range runs is downgraded to HOLD with a review reason. Verdicts
-    without a tracked counter (in range, unknown data, closed positions,
-    non-position verdicts) pass through untouched.
+
+def _record_for(addr, state):
+    rec = (state or {}).get(addr)
+    if isinstance(rec, dict):
+        return rec
+    if isinstance(rec, (int, float)):
+        return {"side": "left", "consecutive_runs": int(rec)}
+    return None
+
+
+def out_of_range_position_verdict(s: dict, state: dict,
+                                  allowed: int = ALLOWED_OUT_OF_RANGE_RUNS) -> dict:
+    """Apply side-aware OOR close policy to one cycle verdict.
+
+    Full-right OOR promotes any non-close verdict (HOLD/REVIEW/COLLECT_FEES)
+    to CLOSE immediately. Full-left OOR defers a close-equivalent verdict
+    (CLOSE/REBALANCE/ROTATE) to HOLD until ``allowed`` consecutive verified
+    runs. Untracked pools (in range or unknown data) pass through untouched.
     """
-    verdict = s.get("verdict") if "verdict" in s else s.get("action")
-    if verdict not in ("CLOSE", "REBALANCE"):
-        return s
+    close_actions = ("CLOSE", "REBALANCE", "ROTATE")
     addr = str(s.get("pool_address") or "")
-    seen = int((counts or {}).get(addr, 0))
-    if seen <= 0 or seen >= allowed:
+    rec = _record_for(addr, state)
+    if not rec:
         return s
+    side = rec.get("side")
+    runs = int(rec.get("consecutive_runs", 0))
     out = dict(s)
-    if "verdict" in s:
-        out["verdict"] = "HOLD"
-    else:
-        out["action"] = "HOLD"
-    reason = (
-        f"out-of-range grace: {seen}/{allowed} consecutive out-of-range runs; "
-        f"{verdict} deferred to the next run (evidence: {s.get('reason')})"
-    )
-    out["reason"] = reason
-    if "note" in s:
-        out["note"] = reason
+    key = "verdict" if "verdict" in s else "action"
+    current = s.get(key)
+    eligible = side == "right" or runs >= allowed
+    if not eligible:
+        out[key] = "HOLD"
+        out["reason"] = (
+            f"full-left out-of-range grace: {runs}/{allowed} consecutive "
+            f"verified runs; close deferred"
+        )
+        out["oor_side"] = side
+        out["oor_consecutive_runs"] = runs
+        out["oor_close_eligible"] = False
+        return out
+    # This is an explicit OOR exit rail. Do not preserve REBALANCE here:
+    # the requested action is to close the position, not close-and-reopen it.
+    out[key] = "CLOSE"
+    out["reason"] = ("full-right out-of-range: immediate close"
+                     if side == "right"
+                     else f"full-left out-of-range: {runs} consecutive runs; close")
+    out["oor_side"] = side
+    out["oor_consecutive_runs"] = runs
+    out["oor_close_eligible"] = True
     return out
