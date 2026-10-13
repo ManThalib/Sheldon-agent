@@ -45,6 +45,7 @@ Design rules:
   or de-risking remove — closing is always allowed.
 """
 
+import datetime
 import json
 import os
 import time
@@ -400,11 +401,36 @@ def resolve_entry(state_dir: str, signal_id: str, note: str = "") -> int:
     entry["status"] = "CLOSE_RESOLVED"
     entry["manual"] = True
     entry["note"] = note or "resolved via --resolve-close"
-    entry["resolved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # Store an epoch float like every other timestamp writer (mark_emitted,
+    # advance). Writing an ISO string here made prune_settled's numeric max()
+    # raise TypeError, so a CLI resolution left the state file unprunable and
+    # crashed every later cycle. Keep the human-readable stamp alongside.
+    entry["resolved_at"] = time.time()
+    entry["resolved_at_iso"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime())
     save_close_state(state_dir, state)
     print(f"RESOLVED {signal_id} -> CLOSE_RESOLVED (manual)")
     return 0
 
+
+def _epoch(value: Any) -> float:
+    """Coerce a stored timestamp to epoch seconds.
+
+    Writers have used both shapes: epoch floats (mark_emitted, advance) and
+    ISO-8601 strings (resolve_entry before 2026-10-14). prune_settled takes
+    a numeric max() over these fields, so normalize both; anything missing
+    or unparseable becomes 0.0 (an entry is then never pruned).
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            return datetime.datetime.strptime(
+                value, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
 
 def prune_settled(state: Dict[str, Dict[str, Any]], now: float = None,
                   max_age_seconds: float = 30 * 24 * 3600
@@ -424,9 +450,9 @@ def prune_settled(state: Dict[str, Dict[str, Any]], now: float = None,
         if entry.get("status") not in SETTLED_STATUSES:
             continue
         terminal_ts = max(
-            entry.get("funds_verified_at") or 0.0,
-            entry.get("resolved_at") or 0.0,
-            entry.get("confirmed_at") or 0.0,
+            _epoch(entry.get("funds_verified_at")),
+            _epoch(entry.get("resolved_at")),
+            _epoch(entry.get("confirmed_at")),
         )
         if terminal_ts and now - terminal_ts > max_age_seconds:
             del state[sid]

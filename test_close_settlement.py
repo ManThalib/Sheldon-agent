@@ -369,6 +369,39 @@ class PruneTests(unittest.TestCase):
         self.assertIn("new", state)
         self.assertIn("stuck", state)   # blocking entries are never pruned
 
+    def test_iso_resolved_at_does_not_crash_prune(self):
+        # resolve_entry (--resolve-close) once wrote resolved_at as an ISO
+        # string while mark_emitted wrote an epoch float; the numeric max()
+        # in prune_settled then raised TypeError and every later cycle died.
+        # Both shapes must be accepted.
+        state = {
+            "manual-iso": {"status": "CLOSE_RESOLVED", "manual": True,
+                           "resolved_at": "2026-10-13T23:01:21Z"},
+            "manual-old-iso": {"status": "CLOSE_RESOLVED", "manual": True,
+                               "resolved_at": "2020-01-01T00:00:00Z"},
+            "manual-float": {"status": "CLOSE_RESOLVED", "manual": True,
+                             "resolved_at": NOW - 100},
+        }
+        prune_settled(state, now=NOW)      # must not raise
+        self.assertIn("manual-iso", state)
+        self.assertNotIn("manual-old-iso", state)   # genuinely old -> pruned
+        self.assertIn("manual-float", state)
+
+    def test_resolve_entry_writes_epoch_float(self):
+        # The CLI resolution path must store a numeric timestamp so the
+        # state file stays prunable by later cycles.
+        from run_cycle.close_settlement import resolve_entry
+        path = tmp_dir()
+        save_close_state(path, {"sig-x": {
+            "status": "CLOSE_REVIEW_REQUIRED", "pool_address": "P1"}})
+        rc = resolve_entry(path, "sig-x", note="test")
+        self.assertEqual(rc, 0)
+        entry = load_close_state(path)["sig-x"]
+        self.assertEqual(entry["status"], "CLOSE_RESOLVED")
+        self.assertTrue(entry["manual"])
+        self.assertIsInstance(entry["resolved_at"], float)
+        prune_settled(load_close_state(path), now=entry["resolved_at"] + 1)
+
 
 def tmp_dir():
     return tempfile.mkdtemp()
