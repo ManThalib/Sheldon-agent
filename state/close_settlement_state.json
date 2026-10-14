@@ -68,70 +68,73 @@
   "sheldon-1791762305-3": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791870349.9251454,
+    "chain_verified_at": 1791940676.5879066,
     "confirmed_at": 1791762332.0,
     "emit_time": 1791762305.3186479,
-    "funds_verified_at": 1791870349.9251454,
+    "funds_verified_at": 1791940676.5879066,
     "journal_decision": "executed",
     "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
-    "position_scan_verified_at": 1791870349.9251454,
+    "position_scan_verified_at": 1791940676.5879066,
     "status": "FUNDS_VERIFIED"
   },
   "sheldon-1791762338-2": {
     "action": "close",
     "emit_time": 1791762338.8128698,
     "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-14: duplicate close emit; position 6CPYF6gS... already closed by sheldon-1791762305-3 (journal executed, tx q51qwZVP..., close_refresh absence asserted); this emit failed 'Position not found'; position account absent on-chain (getAccountInfo null); newest position scan lists no positions.",
     "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
     "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: 6CPYF6gS3MXeWwTJHhrGLmiwP6c7VjjsMg1WixdfsLcE', 'error_name': 'Error'}",
     "rejected_at": 1791762340.0,
-    "status": "CLOSE_REVIEW_REQUIRED"
+    "resolved_at": "2026-10-13T23:01:21Z",
+    "status": "CLOSE_RESOLVED"
   },
   "sheldon-1791769508-1": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791870349.9251454,
+    "chain_verified_at": 1791940676.5879066,
     "confirmed_at": 1791769554.0,
     "emit_time": 1791769508.2432737,
-    "funds_verified_at": 1791870349.9251454,
+    "funds_verified_at": 1791940676.5879066,
     "journal_decision": "executed",
     "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
-    "position_scan_verified_at": 1791870349.9251454,
+    "position_scan_verified_at": 1791940676.5879066,
     "status": "FUNDS_VERIFIED"
   },
   "sheldon-1791827108-1": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791870349.9251454,
+    "chain_verified_at": 1791935123.3028347,
     "confirmed_at": 1791827131.0,
     "emit_time": 1791827108.3737948,
-    "funds_verified_at": 1791870349.9251454,
+    "funds_verified_at": 1791935123.3028347,
     "journal_decision": "executed",
     "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
-    "position_scan_verified_at": 1791870349.9251454,
-    "status": "FUNDS_VERIFIED"
+    "position_scan_verified_at": 1791935123.3028347,
+    "status": "CLOSE_EXECUTED"
   },
   "sheldon-1791827108-2": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791870349.9251454,
+    "chain_verified_at": 1791935123.3028347,
     "confirmed_at": 1791827157.0,
     "emit_time": 1791827108.3738284,
-    "funds_verified_at": 1791870349.9251454,
+    "funds_verified_at": 1791935123.3028347,
     "journal_decision": "executed",
     "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
-    "position_scan_verified_at": 1791870349.9251454,
-    "status": "FUNDS_VERIFIED"
+    "position_scan_verified_at": 1791935123.3028347,
+    "status": "CLOSE_EXECUTED"
   },
   "sheldon-1791870312-1": {
     "action": "close",
     "capital_evidence": "wallet scan newer than close confirmation",
-    "chain_verified_at": 1791870349.9251454,
+    "chain_verified_at": 1791940676.5879066,
     "confirmed_at": 1791870338.0,
     "emit_time": 1791870312.988992,
-    "funds_verified_at": 1791870349.9251454,
+    "funds_verified_at": 1791940676.5879066,
     "journal_decision": "executed",
     "pool_address": "3potGhhaNyzvCNq1CGh2wLbZLLMjpdPtG1Hpj8q2DDVR",
-    "position_scan_verified_at": 1791870349.9251454,
+    "position_scan_verified_at": 1791940676.5879066,
     "status": "FUNDS_VERIFIED"
   }
 }

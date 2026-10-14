@@ -1,0 +1,137 @@
+{
+  "sheldon-1791619654-4": {
+    "action": "close",
+    "emit_time": 1791619654.0063365,
+    "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-11: positions ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN (meteora HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b) and HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r (orca 2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C) were already closed on-chain by owner live-test orphan closes 2026-10-10 (ledger rows live-test-close-orphan-meteora-1 sig 3m7EAWQR..., live-test-close-orphan-orca-1 sig 4Ckud2Xm..., verify_ok meteora; 3 consecutive 'Position not found' dispatch failures confirm absence; position scans show zero positions). Ghost closes resolved, not executed.",
+    "pool_address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN not found', 'error_name': 'Error'}",
+    "rejected_at": 1791619656.0,
+    "status": "CLOSE_RESOLVED"
+  },
+  "sheldon-1791619654-5": {
+    "action": "close",
+    "emit_time": 1791619654.0063696,
+    "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-11: positions ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN (meteora HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b) and HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r (orca 2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C) were already closed on-chain by owner live-test orphan closes 2026-10-10 (ledger rows live-test-close-orphan-meteora-1 sig 3m7EAWQR..., live-test-close-orphan-orca-1 sig 4Ckud2Xm..., verify_ok meteora; 3 consecutive 'Position not found' dispatch failures confirm absence; position scans show zero positions). Ghost closes resolved, not executed.",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r', 'error_name': 'Error'}",
+    "rejected_at": 1791619657.0,
+    "status": "CLOSE_RESOLVED"
+  },
+  "sheldon-1791619666-3": {
+    "action": "close",
+    "emit_time": 1791619666.2432442,
+    "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-11: positions ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN (meteora HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b) and HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r (orca 2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C) were already closed on-chain by owner live-test orphan closes 2026-10-10 (ledger rows live-test-close-orphan-meteora-1 sig 3m7EAWQR..., live-test-close-orphan-orca-1 sig 4Ckud2Xm..., verify_ok meteora; 3 consecutive 'Position not found' dispatch failures confirm absence; position scans show zero positions). Ghost closes resolved, not executed.",
+    "pool_address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN not found', 'error_name': 'Error'}",
+    "rejected_at": 1791619667.0,
+    "status": "CLOSE_RESOLVED"
+  },
+  "sheldon-1791619666-4": {
+    "action": "close",
+    "emit_time": 1791619666.2432723,
+    "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-11: positions ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN (meteora HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b) and HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r (orca 2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C) were already closed on-chain by owner live-test orphan closes 2026-10-10 (ledger rows live-test-close-orphan-meteora-1 sig 3m7EAWQR..., live-test-close-orphan-orca-1 sig 4Ckud2Xm..., verify_ok meteora; 3 consecutive 'Position not found' dispatch failures confirm absence; position scans show zero positions). Ghost closes resolved, not executed.",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r', 'error_name': 'Error'}",
+    "rejected_at": 1791619668.0,
+    "status": "CLOSE_RESOLVED"
+  },
+  "sheldon-1791619807-1": {
+    "action": "close",
+    "emit_time": 1791619807.9692001,
+    "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-11: positions ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN (meteora HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b) and HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r (orca 2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C) were already closed on-chain by owner live-test orphan closes 2026-10-10 (ledger rows live-test-close-orphan-meteora-1 sig 3m7EAWQR..., live-test-close-orphan-orca-1 sig 4Ckud2Xm..., verify_ok meteora; 3 consecutive 'Position not found' dispatch failures confirm absence; position scans show zero positions). Ghost closes resolved, not executed.",
+    "pool_address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN not found', 'error_name': 'Error'}",
+    "rejected_at": 1791619810.0,
+    "status": "CLOSE_RESOLVED"
+  },
+  "sheldon-1791619807-2": {
+    "action": "close",
+    "emit_time": 1791619807.9692464,
+    "journal_decision": "failed",
+    "manual": true,
+    "note": "Manual resolution 2026-10-11: positions ELMyeuX663RTFymhqvMKb2YmkggZMHnKWMKK2KHUsvjN (meteora HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b) and HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r (orca 2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C) were already closed on-chain by owner live-test orphan closes 2026-10-10 (ledger rows live-test-close-orphan-meteora-1 sig 3m7EAWQR..., live-test-close-orphan-orca-1 sig 4Ckud2Xm..., verify_ok meteora; 3 consecutive 'Position not found' dispatch failures confirm absence; position scans show zero positions). Ghost closes resolved, not executed.",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: HD87ugKdgYLcdNb9hRWZauuCXeHjwTuQi6vsmW7EED6r', 'error_name': 'Error'}",
+    "rejected_at": 1791619810.0,
+    "status": "CLOSE_RESOLVED"
+  },
+  "sheldon-1791762305-3": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791931531.8631806,
+    "confirmed_at": 1791762332.0,
+    "emit_time": 1791762305.3186479,
+    "funds_verified_at": 1791931531.8631806,
+    "journal_decision": "executed",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "position_scan_verified_at": 1791931531.8631806,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791762338-2": {
+    "action": "close",
+    "emit_time": 1791762338.8128698,
+    "journal_decision": "failed",
+    "pool_address": "2TAgfogn8JRwwTnsGKUa6WUT5Xdv1iMEzfEDMor68X9C",
+    "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'Position not found: 6CPYF6gS3MXeWwTJHhrGLmiwP6c7VjjsMg1WixdfsLcE', 'error_name': 'Error'}",
+    "rejected_at": 1791762340.0,
+    "status": "CLOSE_REVIEW_REQUIRED"
+  },
+  "sheldon-1791769508-1": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791931531.8631806,
+    "confirmed_at": 1791769554.0,
+    "emit_time": 1791769508.2432737,
+    "funds_verified_at": 1791931531.8631806,
+    "journal_decision": "executed",
+    "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+    "position_scan_verified_at": 1791931531.8631806,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791827108-1": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791931531.8631806,
+    "confirmed_at": 1791827131.0,
+    "emit_time": 1791827108.3737948,
+    "funds_verified_at": 1791931531.8631806,
+    "journal_decision": "executed",
+    "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "position_scan_verified_at": 1791931531.8631806,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791827108-2": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791931531.8631806,
+    "confirmed_at": 1791827157.0,
+    "emit_time": 1791827108.3738284,
+    "funds_verified_at": 1791931531.8631806,
+    "journal_decision": "executed",
+    "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "position_scan_verified_at": 1791931531.8631806,
+    "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1791870312-1": {
+    "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1791931531.8631806,
+    "confirmed_at": 1791870338.0,
+    "emit_time": 1791870312.988992,
+    "funds_verified_at": 1791931531.8631806,
+    "journal_decision": "executed",
+    "pool_address": "3potGhhaNyzvCNq1CGh2wLbZLLMjpdPtG1Hpj8q2DDVR",
+    "position_scan_verified_at": 1791931531.8631806,
+    "status": "FUNDS_VERIFIED"
+  }
+}
