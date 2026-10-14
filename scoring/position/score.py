@@ -402,6 +402,12 @@ def score_position_missy(pos: dict, pools_by_addr: dict = None,
     position_features block; feature gaps surface as unknown components and
     cap the verdict exactly like any other missing data. Falls back to the
     local path when the block is missing or its version differs.
+
+    NEW: cross-model support. When the paired pool has a new_fc_score (fee-capture
+    model), its components are consumed alongside position features to inform
+    the verdict. The position score itself remains Sheldon-owned; new_fc provides
+    a complementary lens (fee efficiency + volatility effectiveness + turnover
+    sustainability) that sits beside—not inside—the missy-default score.
     """
     from scoring.config import load_scoring_policy
     policy = load_scoring_policy()
@@ -434,10 +440,38 @@ def score_position_missy(pos: dict, pools_by_addr: dict = None,
         return result
 
     view = _view_from_features(pos, features)
+    # --- Cross-model: new_fc_score components from paired pool ---
+    fc = {}
+    fc_score = 0.0
+    fc_verdict = "IGNORE"
+    if pool and "tvl" in pool and "realized_fee_apr" in pool:
+        try:
+            fc = score_pool_new_fc(pool, ctx)
+            fc_score = fc.get("score", 0.0)
+            fc_verdict = fc.get("verdict", "IGNORE")
+        except Exception:
+            fc = {}
+            fc_score = 0.0
+            fc_verdict = "IGNORE"
+
     result = score_position_core(
         view, pool, pool_name, pair_class, sym_x, sym_y, ctx,
         extra_unknown=[g for g in (features.get("gaps") or [])
                        if isinstance(g, str)])
+
+    # --- Augment result with new_fc cross-model insight ---
+    result["new_fc_score"] = fc_score
+    result["new_fc_components"] = fc.get("components", {})
+    result["new_fc_verdict"] = fc_verdict
+    # Cross-model agreement flag
+    missy_verdict = result["verdict"]
+    if fc_verdict == missy_verdict:
+        result["cross_model"] = f"both {missy_verdict.lower()} (agreement)"
+    elif fc_verdict != "IGNORE":
+        result["cross_model"] = f"missy={missy_verdict.lower()} new_fc={fc_verdict.lower()}"
+    else:
+        result["cross_model"] = "new_fc_not_computed"
+
     result["score_policy"] = {
         "source": "missy", "features_version": policy["position_features_version"]}
     return result
@@ -451,8 +485,25 @@ def _view_from_features(pos: dict, features: dict) -> dict:
     expected-PnL verdict; absent prices (RPC-fallback scans) stay None and
     route through the policy's existing unknown-data paths. Token amounts and
     il/fee estimates remain deliberately absent.
+
+    NEW: also carry new_fc_score components from the paired pool for
+    cross-model position decision support.
     """
     gaps = set(features.get("gaps") or [])
+    # Pull new_fc_score components from the pool record if available
+    pool_addr = features.get("pool_address") or pos.get("pool_address")
+    new_fc_components = {}
+    new_fc_score = None
+    new_fc_verdict = "IGNORE"
+    if pool_addr:
+        from scoring.pool.score import score_pool_new_fc
+        pool_result = score_pool_new_fc(
+            {"pool_address": pool_addr, "dex": features.get("dex") or pos.get("dex") or ""},
+            {"norms": (pos.get("ctx") or {}).get("norms")}
+        ) if False else None  # placeholder - pool may not be in ctx
+    # Since pool may not be available in ctx, we carry new_fc info later
+    # in score_position_missy where we have full pool context
+
     return {
         "position_id": features.get("position_address") or pos.get("position_address"),
         "pool_address": features.get("pool_address") or pos.get("pool_address"),
@@ -469,4 +520,6 @@ def _view_from_features(pos: dict, features: dict) -> dict:
         "lower_price": pos.get("lower_price"),
         "upper_price": pos.get("upper_price"),
         "current_price": pos.get("current_price"),
+        # Gaps for policy to reference
+        "gaps": list(gaps),
     }

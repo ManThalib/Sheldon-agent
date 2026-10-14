@@ -4,11 +4,15 @@ Rotation is a two-cycle workflow: cycle N emits a close for the source
 position and reserves the candidate; cycle N+1 settles once the source is
 gone from the position scan. This module owns the state machine so the
 transitions are unit-testable without the CLI.
+
+Additional feature: turnover-based rotation signals. Pools with
+high turnover_penalty_score (unsustainable turnover >20xTVL/day) are
+flagged for rotation consideration alongside the standard close workflow.
 """
+
 
 import time
 from datetime import datetime, timedelta, timezone
-
 
 def _utc_iso():
     """Return current time in Asia/Shanghai (UTC+8) ISO format."""
@@ -135,3 +139,38 @@ def _release_unemitted_rotations(rotations: dict, cycle_day: str = None) -> list
             "Rotation close signal was never emitted; reservation released")
         review.append({"pool_address": addr, "reason": entry["reason"]})
     return review
+
+
+def check_turnover_rotation_signals(pool_scores: list, threshold: float = 8.0) -> list:
+    """Check pool scores for turnover-based rotation signals.
+
+    Pools with ``turnover_penalty_score`` above ``threshold`` (default 8.0,
+    i.e. near the 20×TVL/day cap) are flagged for rotation consideration.
+
+    Returns list of dicts with pool_address, score, turnover_penalty_score,
+    and reason for rotation consideration.
+    """
+    signals = []
+    for v in pool_scores:
+        components = v.get("components", {})
+        tp_score = components.get("turnover_penalty_score", 0)
+        if tp_score >= threshold:
+            addr = v.get("pool_address")
+            score = v.get("score")
+            new_fc = v.get("new_fc_score")
+            reason = (
+                f"turnover_penalty_score={tp_score:.1f} >= {threshold} "
+                f"(approaching 20xTVL/day cap); "
+                f"new_fc={new_fc['score'] if new_fc else 'N/A'}"
+                if new_fc else
+                f"turnover_penalty_score={tp_score:.1f} >= {threshold} "
+                f"(approaching 20xTVL/day cap)")
+            signals.append({
+                "pool_address": addr,
+                "missy_score": score,
+                "turnover_penalty_score": tp_score,
+                "new_fc_score": new_fc["score"] if new_fc else None,
+                "reason": reason,
+                "action": "consider_rotation",
+            })
+    return signals

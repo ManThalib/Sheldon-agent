@@ -81,18 +81,33 @@ def _range_center(pool: dict, dex: str):
     Meteora uses DLMM bin IDs (``active_bin_id``); Raydium CLMM and Orca
     Whirlpool use ticks. Missy may supply ``current_tick``,
     ``current_tick_index`` or reuse ``active_bin_id`` for the tick value.
+    RPC-batched tick enrichment (``tick_source: "rpc_batched"``) may
+    populate ``current_tick_equivalent``; this is given high precedence.
     Returns None when the tick/bin is unknown.
     """
+    import math
+
     if dex == "meteora":
-        val = pool.get("active_bin_id")
-        if val is None:
-            return None
-        return int(val)
-    for key in ("current_tick", "current_tick_index", "active_bin_id"):
+        # Priority: active_bin_id > current_tick_equivalent > current_tick_index
+        for key in ("active_bin_id", "current_tick_equivalent", "current_tick_index"):
+            val = pool.get(key)
+            if val is None:
+                continue
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    # For non-Meteora (Raydium CLMM, Orca Whirlpool): prioritize RPC-enriched fields
+    for key in ("current_tick_equivalent", "current_tick", "current_tick_index", "active_bin_id"):
         val = pool.get(key)
         if val is None or val in ("", "0"):
             continue
-        return int(val)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -199,11 +214,48 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
                                 "reason": f"bin_step {bin_step} not in allowed set "
                                 f"{sorted(allowed_bin_steps)} (George rail)"})
                 continue
-        score = v.get("score")
-        if score is None or float(score) < min_score:
-            skipped.append({**base,
-                            "reason": f"score {score} < policy min_open_score {min_score}"})
-            continue
-        seen.add(addr)
-        kept.append(v)
+        # Dual-model scoring gate: require cross-model agreement or combined score
+    missy_score = v.get("score")
+    new_fc = v.get("new_fc_score")
+    new_fc_components = v.get("new_fc_components", {})
+
+    # Determine verdicts from both models
+    missy_verdict = pool_verdict(float(missy_score), thresholds) if missy_score else "IGNORE"
+    new_fc_verdict = new_fc["verdict"] if new_fc else "IGNORE"
+
+    # Cross-model agreement check
+    models_agree = missy_verdict == new_fc_verdict
+
+    # Option 1: Both models must meet threshold (conservative)
+    missy_above = float(missy_score) >= min_score if missy_score else False
+    new_fc_above = float(new_fc["score"]) >= min_score if new_fc else False
+
+    # Option 2: Weighted combination (if configured)
+    use_weighted = (ctx or {}).get("use_weighted_combination", False)
+    combined_score = None
+    if use_weighted and missy_score is not None and new_fc and new_fc.get("score") is not None:
+        missy_w = 0.6  # missy weight
+        fc_w = 0.4     # new_fc weight
+        combined_score = round(missy_w * float(missy_score) + fc_w * float(new_fc["score"]), 2)
+        combined_above = combined_score >= min_score
+    else:
+        combined_above = missy_above and new_fc_above
+
+    # Decision logic
+    if not missy_above and not new_fc_above:
+        # Neither model above threshold
+        skipped.append({**base,
+                        "reason": f"dual-model: missy={missy_score}<{min_score} new_fc={new_fc.get('score',0)<min_score and new_fc.get('score') or 'N/A'}<{min_score}"})
+        continue
+    if not models_agree and not use_weighted:
+        # Models disagree without weighted combo - conservative approach
+        skipped.append({**base,
+                        "reason": f"dual-model disagreement: missy={missy_verdict} new_fc={new_fc_verdict}"})
+        continue
+    if not combined_above:
+        skipped.append({**base,
+                        "reason": f"dual-model combined score {combined_score} < {min_score}"})
+        continue
+
+    score = combined_score if use_weighted and combined_score is not None else missy_score
     return kept, skipped

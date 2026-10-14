@@ -62,7 +62,7 @@ that produced it. George's `common/rails_loader.py` reads `min_open_score`
 from the same `scoring` block (falling back to the legacy
 `pool_eligibility` path) and exposes `scoring_source` for diagnostics.
 
-**Cross-model**: Every `pool_scores` entry from the Missy path now also carries
+**Cross-model with new_fc_score**: Every `pool_scores` entry from the Missy path now also carries
 `new_fc_score`, `new_fc_components`, `new_fc_verdict`, and `cross_model`
 fields. These reflect the experimental fee-capture model (log-scaled fee/TVL
 ratio, daily fee USD, volatility effectiveness, turnover penalty) and provide
@@ -71,6 +71,14 @@ agreement (`both open (agreement)`) or disagreement (`missy=open new_fc=ignore`)
 between the two models. This aids diagnostics: significant disagreement
 triggers investigation into `fee_tvl_ratio`, turnover sustainability, or
 volatility effectiveness.
+
+**Dual-model scoring gate** (run_cycle/gates.py): Open candidates now pass
+through a dual-model gate that requires cross-model agreement or a combined
+score. The `missy` pool score must meet `min_open_score` AND the `new_fc`
+fee-capture model score must also meet the threshold, OR a weighted combination
+(`missy_weight=0.6, new_fc_weight=0.4`) is used when `use_weighted_combination`
+is enabled in context. If models disagree without the weighted combination, the
+conservative approach is to skip the candidate.
 
 ### Backtest: scoring source and gate agreement
 
@@ -99,6 +107,28 @@ against the legacy gates, counts agreement and both mismatch directions
 (Missy stricter / legacy stricter), histograms Missy reject reasons, and
 prints a backstop verdict: keep while any scan lacks the flag or any pool
 shows `legacy_strict`.
+
+### Dual-model scoring gate
+
+Open candidates now pass through a dual-model gate in `_filter_open_candidates`
+(run_cycle/gates.py). The gate requires:
+
+1. **Both models above threshold**: Both `missy_score >= min_open_score` AND
+   `new_fc_score >= min_open_score`
+
+2. **Or weighted combination**: When `use_weighted_combination` is enabled in
+   context, a combined score is computed as `0.6 * missy_score + 0.4 * new_fc_score`.
+   The candidate passes if the combined score >= min_open_score.
+
+3. **Cross-model agreement**: If models disagree without the weighted combo,
+   the candidate is conservatively skipped (dual-model disagreement).
+
+4. **Decision**: The final score used is the combined score (if weighted) or the
+   missy score otherwise.
+
+This dual-model approach ensures that pools must be strong according to both
+the missy-default APR/TVL/volatility model AND the new_fc fee-capture model
+(or their weighted combination) to be considered for opening positions.
 
 ### Pool LP Opportunity Score
 

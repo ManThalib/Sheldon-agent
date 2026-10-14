@@ -4,18 +4,27 @@
     "stable_stable": {
       "weights": {"fee_yield": 35.0, "turnover": 15.0, "depth": 15.0,
                   "depeg_safety": 25.0, "volatility_fit": 10.0},
+      "new_fc_weights": {"fee_yield_score": 35.0, "absolute_fee": 25.0,
+                        "liquidity_effectiveness": 20.0,
+                        "turnover_penalty": 10.0, "lp_share_adjustment": 10.0},
       "vol_peak_pct": 0.5,
       "apr_cap_pct": 100.0
     },
     "stable_bluechip": {
       "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
                   "volatility_fit": 20.0, "depeg_safety": 15.0},
+      "new_fc_weights": {"fee_yield_score": 30.0, "absolute_fee": 25.0,
+                        "liquidity_effectiveness": 20.0,
+                        "turnover_penalty": 10.0, "lp_share_adjustment": 10.0},
       "vol_peak_pct": 8.0,
       "apr_cap_pct": 300.0
     },
     "bluechip_bluechip": {
       "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
                   "volatility_fit": 35.0},
+      "new_fc_weights": {"fee_yield_score": 30.0, "absolute_fee": 25.0,
+                        "liquidity_effectiveness": 20.0,
+                        "turnover_penalty": 10.0, "lp_share_adjustment": 10.0},
       "vol_peak_pct": 10.0,
       "apr_cap_pct": 300.0
     }

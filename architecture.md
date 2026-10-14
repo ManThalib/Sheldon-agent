@@ -34,8 +34,9 @@ consists of these modules:
 9. **`tuner.py`** — Out-of-sample weight search over historical PnL (writes
    `profiles.tuned.json`, `--apply` with backup)
 10. **`profiles.json`** — Externalized scoring configuration (weights,
-    thresholds, constants, dynamic knobs). Missing file → built-in defaults;
-    invalid file → fatal error (fail-closed).
+    thresholds, constants, dynamic knobs). Per-pair-class weights include
+    `new_fc_weights` for experimental fee-capture model. Missing file → built-in
+    defaults; invalid file → fatal error (fail-closed).
 11. **`sheldon_policy.json`** — Strategy policy (pool eligibility, sizing,
     windows, slippage, add_policy)
 12. **`backtest.py`** — Historical replay of pool/position verdicts over the
@@ -121,6 +122,7 @@ components whose inputs were missing or unusable (e.g. Orca fee sentinel
 | 3. Adaptive thresholds | `dynamic.py` | `OPEN`/`WATCH` cut-offs are quantiles of the scored universe (floor/ceil clamps keep them sane) |
 | 4. Expected-PnL verdicts | `dynamic.py` | Compares HOLD vs CLOSE vs REBALANCE expected value over a short horizon; only overrides when inputs are complete and the margin is decisive |
 | 5. Weight tuner | `tuner.py` | Random search over weight perturbations, validated on the last 20% of scan history, writes `profiles.tuned.json` |
+| 6. Cross-model scoring | `scoring/pool/score.py`, `scoring/position/score.py`, `run_cycle/gates.py` | new_fc_score (fee-capture model) provides complementary lens alongside missy-default; dual-model gate in `_filter_open_candidates` requires cross-model agreement or weighted combination |
 
 ## Verdict Mapping
 

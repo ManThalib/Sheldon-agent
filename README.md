@@ -30,7 +30,7 @@ python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N] \
 
 - `lp_scoring.py` — core deterministic scoring engine (config-driven, data-quality aware)
 - `run_cycle/` — modular cycle runner split into focused sub-modules:
-  - `gates.py` — trading window and open-candidate filtering
+  - `gates.py` — trading window and open-candidate filtering (includes dual-model scoring gate with new_fc_score)
   - `signals.py` — George-signal building and writing
   - `report.py` — human-readable logs and summaries
 - `dynamic/` — modular dynamic calibration:
@@ -53,12 +53,12 @@ python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N] \
   - `reports.py` — replay reports
   - `synthetic_pnl.py` — synthetic PnL computation
 - `strategy/` — sizing and adaptive ranges from `sheldon_policy.json`
-- `capital.py` — wallet scan loader: idle USDC, dust assets
+- `capital.py` — wallet scan loader: idle USDC, dust assets, SOL reserve (includes `_is_sol_asset` helper and SOL reserve lamports)
 - `range_state.py` — out-of-range close rail: full-right closes at once,
   full-left deferred to 2 consecutive verified runs
 - `idle_sweep.py` — idle-capital sweep into best tracked position
 - `tuner.py` — out-of-sample weight search over historical PnL
-- `profiles.json` / `profiles.tuned.json` — scoring profiles and tuned outputs
+- `profiles.json` / `profiles.tuned.json` — scoring profiles and tuned outputs (includes `new_fc_weights` per pair class for experimental fee-capture model)
 - `sheldon_policy.json` — strategy policy: pool eligibility, sizing, windows, slippage, add_policy
 - `models.py` — legacy/unused: nothing imports them (scoring returns plain dicts; config lives in `profiles.json` via `lp_scoring.DEFAULT_CONFIG`)
 
