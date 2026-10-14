@@ -114,7 +114,8 @@ def _range_center(pool: dict, dex: str):
 def _filter_open_candidates(open_candidates: list, active_positions: dict,
                             policy_windows: dict, min_score: float,
                             min_liquidity: float, min_volume: float,
-                            allowed_bin_steps: set, reserved_pools: set = None) -> tuple:
+                            allowed_bin_steps: set, reserved_pools: set = None,
+                            ctx: dict = None) -> tuple:
     """Drop open candidates that must not become signals.
 
     Honors Missy's eligibility flag when present (the default path after
@@ -214,48 +215,60 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
                                 "reason": f"bin_step {bin_step} not in allowed set "
                                 f"{sorted(allowed_bin_steps)} (George rail)"})
                 continue
-        # Dual-model scoring gate: require cross-model agreement or combined score
-    missy_score = v.get("score")
-    new_fc = v.get("new_fc_score")
-    new_fc_components = v.get("new_fc_components", {})
+        # Dual-model scoring gate: require cross-model agreement or a weighted
+        # combination when the fee-capture model (new_fc) produced a score.
+        # In verdict dicts new_fc_score is a SCALAR and its verdict lives in
+        # new_fc_verdict (see scoring/pool/score.py). Candidates without a
+        # new_fc score fall back to the Missy-only rail (original behavior).
+        missy_score = v.get("score")
+        new_fc_score = v.get("new_fc_score")
+        new_fc_verdict = v.get("new_fc_verdict", "IGNORE")
 
-    # Determine verdicts from both models
-    missy_verdict = pool_verdict(float(missy_score), thresholds) if missy_score else "IGNORE"
-    new_fc_verdict = new_fc["verdict"] if new_fc else "IGNORE"
+        missy_above = missy_score is not None and float(missy_score) >= min_score
+        new_fc_above = new_fc_score is not None and float(new_fc_score) >= min_score
 
-    # Cross-model agreement check
-    models_agree = missy_verdict == new_fc_verdict
+        use_weighted = bool((ctx or {}).get("use_weighted_combination", False))
+        combined_score = None
+        if use_weighted and missy_score is not None and new_fc_score is not None:
+            missy_w = 0.6  # missy weight
+            fc_w = 0.4     # new_fc weight
+            combined_score = round(missy_w * float(missy_score)
+                                   + fc_w * float(new_fc_score), 2)
+            combined_above = combined_score >= min_score
+        else:
+            combined_above = missy_above and new_fc_above
 
-    # Option 1: Both models must meet threshold (conservative)
-    missy_above = float(missy_score) >= min_score if missy_score else False
-    new_fc_above = float(new_fc["score"]) >= min_score if new_fc else False
+        if new_fc_score is not None:
+            # Second model was computed: enforce the dual-model gate.
+            from scoring.config import get_config
+            from scoring.pool.score import pool_verdict
+            thresholds = (ctx or {}).get("thresholds") or get_config()["pool_thresholds"]
+            missy_verdict = (pool_verdict(float(missy_score), thresholds)
+                             if missy_score else "IGNORE")
 
-    # Option 2: Weighted combination (if configured)
-    use_weighted = (ctx or {}).get("use_weighted_combination", False)
-    combined_score = None
-    if use_weighted and missy_score is not None and new_fc and new_fc.get("score") is not None:
-        missy_w = 0.6  # missy weight
-        fc_w = 0.4     # new_fc weight
-        combined_score = round(missy_w * float(missy_score) + fc_w * float(new_fc["score"]), 2)
-        combined_above = combined_score >= min_score
-    else:
-        combined_above = missy_above and new_fc_above
+            if not missy_above and not new_fc_above:
+                # Neither model above threshold
+                skipped.append({**base,
+                                "reason": f"dual-model: missy={missy_score}<{min_score} "
+                                          f"new_fc={new_fc_score}<{min_score}"})
+                continue
+            if not use_weighted and missy_verdict != new_fc_verdict:
+                # Models disagree without weighted combo - conservative approach
+                skipped.append({**base,
+                                "reason": f"dual-model disagreement: "
+                                          f"missy={missy_verdict} new_fc={new_fc_verdict}"})
+                continue
+            if not combined_above:
+                skipped.append({**base,
+                                "reason": f"dual-model combined score {combined_score} < {min_score}"})
+                continue
+        else:
+            # Missy-only rail (original behavior) when the second model is absent.
+            if missy_score is None or float(missy_score) < min_score:
+                skipped.append({**base,
+                                "reason": f"score {missy_score} < policy min_open_score {min_score}"})
+                continue
 
-    # Decision logic
-    if not missy_above and not new_fc_above:
-        # Neither model above threshold
-        skipped.append({**base,
-                        "reason": f"dual-model: missy={missy_score}<{min_score} new_fc={new_fc.get('score',0)<min_score and new_fc.get('score') or 'N/A'}<{min_score}"})
-        continue
-    if not models_agree and not use_weighted:
-        # Models disagree without weighted combo - conservative approach
-        skipped.append({**base,
-                        "reason": f"dual-model disagreement: missy={missy_verdict} new_fc={new_fc_verdict}"})
-        continue
-    if not combined_above:
-        skipped.append({**base,
-                        "reason": f"dual-model combined score {combined_score} < {min_score}"})
-        continue
-
-    score = combined_score if use_weighted and combined_score is not None else missy_score
+        seen.add(addr)
+        kept.append(v)
     return kept, skipped

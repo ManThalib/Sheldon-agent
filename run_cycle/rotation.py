@@ -161,7 +161,7 @@ def check_turnover_rotation_signals(pool_scores: list, threshold: float = 8.0) -
             reason = (
                 f"turnover_penalty_score={tp_score:.1f} >= {threshold} "
                 f"(approaching 20xTVL/day cap); "
-                f"new_fc={new_fc['score'] if new_fc else 'N/A'}"
+                f"new_fc={new_fc}"
                 if new_fc else
                 f"turnover_penalty_score={tp_score:.1f} >= {threshold} "
                 f"(approaching 20xTVL/day cap)")
@@ -169,7 +169,7 @@ def check_turnover_rotation_signals(pool_scores: list, threshold: float = 8.0) -
                 "pool_address": addr,
                 "missy_score": score,
                 "turnover_penalty_score": tp_score,
-                "new_fc_score": new_fc["score"] if new_fc else None,
+                "new_fc_score": new_fc,
                 "reason": reason,
                 "action": "consider_rotation",
             })

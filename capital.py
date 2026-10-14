@@ -77,7 +77,11 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
             sol_raw = float(asset.get("amount_raw") or 0)
             idle_sol_raw_lamports += sol_raw
             idle_sol_usd += value
-            # Reserve is netted from deployable_sol_raw_lamports downstream
+            # SOL is the reserve mint (RESERVED_MINTS = {SOL_MINT}): its USD
+            # value counts as reserved and is never deployable USD. The
+            # lamports-level reserve netting happens via
+            # deployable_sol_raw_lamports downstream.
+            reserved_total += value
             continue
 
         if is_native_sol or mint in RESERVED_MINTS:

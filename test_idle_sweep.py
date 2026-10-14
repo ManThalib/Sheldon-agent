@@ -43,7 +43,7 @@ POLICY = {
     "default_max_position_usd": 100.0,
 }
 
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDC_MINT = "EPjFWdd5AfqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 POOL_A = "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y"   # tracked, in range
 POOL_B = "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"  # tracked, in range
 POS_A = "43ivjtQ7s8AweC2suoAULYAhPVtQRapAfsahdXDDs1QM"
