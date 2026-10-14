@@ -58,6 +58,20 @@ CLOSE_STATE_FILENAME = "close_settlement_state.json"
 # States that do not block opens.
 SETTLED_STATUSES: Set[str] = {"FUNDS_VERIFIED", "CLOSE_RESOLVED"}
 
+# States at or beyond CLOSE_EXECUTED in the forward settlement ladder.
+# Re-folding an `executed` journal decision must never move an entry that
+# already reached one of these backwards: the journal is replayed every
+# cycle, so an unconditional fold re-opens settled closes forever. That
+# wedged opens on pools re-opened after a close — the new position makes
+# absence unverifiable, so the rewound CLOSE_EXECUTED can never advance
+# again (verified 2026-10-14: Oct-12 closes reached FUNDS_VERIFIED at
+# 23:45, were rewound by the next replay, and blocked every open).
+NON_REGRESSING_STATUSES: Set[str] = SETTLED_STATUSES | {
+    "CLOSE_EXECUTED",
+    "CLOSE_CHAIN_VERIFIED",
+    "POSITION_SCAN_VERIFIED",
+}
+
 # Journal decisions that mean the close did not go through.
 REJECTED_DECISIONS: Set[str] = {"rejected", "failed", "failed_verify"}
 
@@ -238,7 +252,13 @@ def update_from_journal(state: Dict[str, Dict[str, Any]],
         entry["pool_address"] = entry.get("pool_address") or res.get(
             "pool_address")
         if decision == "executed":
-            entry["status"] = "CLOSE_EXECUTED"
+            # Fold facts only; never regress status. A journal replay of an
+            # already-executed close is not news. Rewinding a settled or
+            # advancing entry here wedges the gate permanently when the pool
+            # gained a new position after the close (absence can never be
+            # re-verified), so guard every state at or beyond CLOSE_EXECUTED.
+            if entry.get("status") not in NON_REGRESSING_STATUSES:
+                entry["status"] = "CLOSE_EXECUTED"
             # Keep the first confirmation time; never regress it.
             if not entry.get("confirmed_at") and ts:
                 entry["confirmed_at"] = ts
@@ -331,6 +351,13 @@ def advance(state: Dict[str, Dict[str, Any]],
         if entry.get("manual"):
             continue
         if status in SETTLED_STATUSES:
+            continue
+        if entry.get("funds_verified_at"):
+            # Self-heal a rewound entry: funds_verified_at is only ever
+            # stamped by this ladder reaching FUNDS_VERIFIED, so restore
+            # that status instead of re-walking a ladder whose absence
+            # check can never re-fire once the pool holds a new position.
+            entry["status"] = "FUNDS_VERIFIED"
             continue
         pool = entry.get("pool_address")
         present = pool in active_positions if pool else None

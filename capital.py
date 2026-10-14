@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 # --------------------------------------------------------------------------
 # Token mints
 # --------------------------------------------------------------------------
-USDC_MINT = "EPjFWdd5AfqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 # Tokens that should never be treated as dust (owner-editable list).

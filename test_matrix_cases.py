@@ -220,5 +220,59 @@ class MatrixSheldonTests(unittest.TestCase):
         return os.path.join(tempfile.mkdtemp(), "no-journal-here")
 
 
+    # ---- case 14: journal replay must never rewind a settled close ------
+    # 2026-10-14 regression: update_from_journal re-marked every known
+    # executed close as CLOSE_EXECUTED on each cycle's journal replay, so a
+    # close that reached FUNDS_VERIFIED was rewound as soon as the pool was
+    # re-opened (new position makes absence unverifiable) and blocked all
+    # opens forever.
+    def test_case14_replay_does_not_regress_funds_verified(self):
+        state = {"s1": {"status": "FUNDS_VERIFIED", "pool_address": "P1",
+                        "confirmed_at": NOW - 600,
+                        "funds_verified_at": NOW - 300}}
+        entries = {"s1": {"status": "executed", "pool_address": "P1",
+                          "timestamp": NOW - 600}}
+        update_from_journal(state, entries, {"P1": True}, True)
+        self.assertEqual(state["s1"]["status"], "FUNDS_VERIFIED")
+        self.assertEqual(state["s1"]["confirmed_at"], NOW - 600)
+        blocking, _ = summarize(state)
+        self.assertFalse(any("s1" in b for b in blocking))
+
+    def test_case14b_replay_does_not_rewind_mid_ladder(self):
+        for status in ("CLOSE_EXECUTED", "CLOSE_CHAIN_VERIFIED",
+                       "POSITION_SCAN_VERIFIED"):
+            state = {"s1": {"status": status, "pool_address": "P1",
+                            "confirmed_at": NOW - 600}}
+            entries = {"s1": {"status": "executed", "pool_address": "P1",
+                              "timestamp": NOW - 600}}
+            update_from_journal(state, entries, {"P1": False}, True)
+            self.assertEqual(state["s1"]["status"], status)
+
+    def test_case14c_first_executed_fold_still_marks_close_executed(self):
+        state = {"s1": emitted_entry()}
+        entries = {"s1": {"status": "executed", "pool_address": "P1",
+                          "confirmed_at": NOW - 600}}
+        update_from_journal(state, entries, {"P1": True}, True)
+        self.assertEqual(state["s1"]["status"], "CLOSE_EXECUTED")
+        self.assertEqual(state["s1"]["confirmed_at"], NOW - 600)
+
+    def test_case14d_advance_self_heals_rewound_entry_with_funds_stamped(self):
+        # A close whose funds_verified_at was already stamped (the ladder
+        # reached FUNDS_VERIFIED) but whose status a replay rewound to
+        # CLOSE_EXECUTED — and the pool now holds a NEW position, so the
+        # absence check can never re-fire. The stamped evidence must win.
+        state = {"s1": {"status": "CLOSE_EXECUTED", "pool_address": "P1",
+                        "confirmed_at": NOW - 600,
+                        "funds_verified_at": NOW - 300,
+                        "capital_evidence": "wallet scan newer than close "
+                                           "confirmation"}}
+        active = {"P1": {"pool_address": "P1"}}   # the re-opened position
+        advance(state, active, wallet_mtime=NOW - 10,
+                position_mtime=NOW - 5, now=NOW)
+        self.assertEqual(state["s1"]["status"], "FUNDS_VERIFIED")
+        blocking, _ = summarize(state)
+        self.assertFalse(any("s1" in b for b in blocking))
+
+
 if __name__ == "__main__":
     unittest.main()
