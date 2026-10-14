@@ -106,5 +106,11 @@
     25,
     50,
     100
-  ]
+  ],
+  "range": {
+    "_comment": "Volatility-adaptive range width (strategy/range). width_factor: cover +/- volatility*width_factor per side. min_half_width: absolute floor in bins (Meteora) / raw 1bp ticks (Orca, Raydium). min_half_fraction: floor as a price fraction per side (0.01 = +/-1%) so the floor means the same price width on every DEX/tick-spacing; added 2026-10-14 after the Czfq3xZZ SOL-USDC incident where the tick-count floor let a ts=4 Whirlpool open at +/-0.1% and hit its edge in 45 minutes.",
+    "width_factor": 0.5,
+    "min_half_width": 10,
+    "min_half_fraction": 0.01
+  }
 }

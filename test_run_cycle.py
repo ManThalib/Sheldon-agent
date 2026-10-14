@@ -435,14 +435,40 @@ class AdaptiveRangeTests(unittest.TestCase):
         half = adaptive_half_width(pool)
         self.assertGreaterEqual(half, 10)
 
-    def test_raydium_tick_spacing(self):
+    def test_raydium_tick_spacing_raw_ticks(self):
+        # Orca/Raydium half-width is raw 1bp ticks: vol 2% * WIDTH_FACTOR 0.5
+        # = +/-1% target = 100 ticks. (The old spacing-unit formula returned
+        # spacing counts that were then applied as raw ticks — 4x narrow on
+        # a ts=4 pool.)
         pool = {"dex": "raydium", "volatility": 2.0, "bin_step": 0, "tick_spacing": 1}
-        half = adaptive_half_width(pool)
-        self.assertGreaterEqual(half, 10)
+        self.assertEqual(adaptive_half_width(pool), 100)
 
-    def test_zero_volatility_defaults_to_min(self):
+    def test_orca_incident_replay_floor_widens_narrow_estimate(self):
+        # 2026-10-14 Czfq3xZZ replay: Orca's old 2-sample day estimate read
+        # 0.137% for SOL-USDC (ts=4); the tick-count floor opened ±10 raw
+        # ticks = ±0.1% and price sat 5 ticks from the edge in 45 minutes.
+        # The price-fraction floor (±1%) now yields 100 raw ticks.
+        pool = {"dex": "orca", "volatility": 0.137, "bin_step": 0, "tick_spacing": 4}
+        self.assertEqual(adaptive_half_width(pool), 100)
+
+    def test_orca_healthy_volatility_raw_ticks(self):
+        # Corrected day estimate (~6.13% from the 3-sample window) on the
+        # same pool: ±3.02% target -> 302 raw ticks.
+        pool = {"dex": "orca", "volatility": 6.13, "bin_step": 0, "tick_spacing": 4}
+        self.assertEqual(adaptive_half_width(pool), 302)
+
+    def test_fraction_floor_price_parity_across_dex(self):
+        # Same ±1% floor expressed in each DEX's own units.
+        orca = {"dex": "orca", "volatility": 0.0, "bin_step": 0, "tick_spacing": 1}
+        meteora = {"dex": "meteora", "volatility": 0.0, "bin_step": 10, "tick_spacing": 0}
+        self.assertEqual(adaptive_half_width(orca), 100)    # 100 x 1bp ticks
+        self.assertEqual(adaptive_half_width(meteora), 10)  # 10 x 10bp bins
+
+    def test_zero_volatility_uses_fraction_floor(self):
+        # Zero/unknown volatility no longer opens at the 10-bin structural
+        # floor: bs=4 -> ±1% = 25 bins.
         pool = {"dex": "meteora", "volatility": 0.0, "bin_step": 4, "tick_spacing": 4}
-        self.assertEqual(adaptive_half_width(pool), 10)
+        self.assertEqual(adaptive_half_width(pool), 25)
 
     def test_extreme_volatility_clamped(self):
         # Non-Meteora DEXes keep the generic 1000 cap.

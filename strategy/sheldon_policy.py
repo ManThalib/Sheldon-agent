@@ -121,9 +121,20 @@ def get_policy() -> Dict[str, Any]:
 
 # --------------------------------------------------------------------------
 # Volatility-adaptive range constants (centered range)
+# Policy values live in sheldon_policy.json "range"; the constants below are
+# the fallback defaults when the file lacks the block.
 # --------------------------------------------------------------------------
-WIDTH_FACTOR = 0.5        # cover +/- volatility * WIDTH_FACTOR on each side
-MIN_HALF_WIDTH = 10       # minimum bins/ticks on each side
+_range_policy = _POLICY.get("range") or {}
+# Cover +/- volatility * WIDTH_FACTOR on each side.
+WIDTH_FACTOR = float(_range_policy.get("width_factor", 0.5))
+# Absolute structural floor, in bins (Meteora) / raw ticks (Orca, Raydium).
+MIN_HALF_WIDTH = int(_range_policy.get("min_half_width", 10))
+# Price-fraction floor per side (0.01 = +/-1%). A tick/bin count floor means
+# different price widths per pool: 10 raw ticks on a ts=4 Whirlpool is
+# +/-0.1% while 10 bins at bin_step 10 is +/-1%. The 2026-10-14 Czfq3xZZ
+# incident opened SOL-USDC at the tick-count floor and reached the range
+# edge within 45 minutes, so the floor is expressed in price fraction.
+MIN_HALF_FRACTION = float(_range_policy.get("min_half_fraction", 0.01))
 MAX_HALF_WIDTH = 1000     # maximum bins/ticks on each side (default cap)
 # George's Meteora DLMM executor rail: a single Meteora init tx can only
 # create ~70 bins, so Meteora ranges must be capped at 70 bins inclusive.
