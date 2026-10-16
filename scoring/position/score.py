@@ -142,10 +142,10 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
             return 0.0, True
         span = upper - lower
         edge_dist = min(current - lower, upper - current) / (span / 2.0)
-        # edge_frac: 0 at center, 1 at boundary. New formula rewards being
-        # centered: 1 - edge_frac gives 1.0 at center, 0.0 at edge.
+        # edge_dist: 1.0 at center, 0.0 at boundary. Centering reward:
+        # full credit at center (saturating halfway in), zero at the edge.
         edge_frac = clamp((edge_dist - 0.0) / 0.5, 0.0, 1.0)
-        return round(max_pts * (1.0 - edge_frac), 2), True
+        return round(max_pts * edge_frac, 2), True
     edge = pos.get("edge_distance_frac")
     if "in_range" in pos and pos["in_range"] is not None:
         # A fallback record with null tick bounds reports in_range=false
@@ -158,8 +158,9 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
             return 0.0, True
         if isinstance(edge, (int, float)):
             edge_frac = clamp(float(edge), 0.0, 1.0)
-            # New: centering reward — 1.0 at center, 0.0 at edge
-            return round(max_pts * (1.0 - edge_frac), 2), True
+            # Missy's edge_distance_frac: 1.0 at center, 0.0 at boundary.
+            # Centering reward: full credit at center, zero at the edge.
+            return round(max_pts * edge_frac, 2), True
         return round(max_pts, 2), True
     return round(max_pts * unknown_credit, 2), False
 

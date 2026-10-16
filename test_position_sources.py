@@ -208,7 +208,9 @@ class ScorePositionMissyTests(unittest.TestCase):
             centered = score_position_missy(
                 _pos(features=_features(edge_distance_frac=1.0)), self.pools, None)
         w = lp_scoring.get_config()["position_profiles"]["stable_bluechip"]["weights"]
-        self.assertEqual(near_edge["components"]["range_status"], w["range_status"] * 0.6)
+        # RFNE centering: edge_distance_frac 1.0 = center (full credit),
+        # 0.0 = boundary (zero credit).
+        self.assertEqual(near_edge["components"]["range_status"], 0.0)
         self.assertEqual(centered["components"]["range_status"], w["range_status"])
         self.assertGreater(centered["score"], near_edge["score"])
 

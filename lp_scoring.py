@@ -928,7 +928,6 @@ def score_position_staleness(pos: dict, max_pts: float) -> tuple:
         return round(max_pts, 2), True
 
     total_days = float(total_days)
-    in_range = False is None and pos.get("in_range") is not None
 
     # Determine in-range days:
     # If the record explicitly tracks in_range_days, use it.

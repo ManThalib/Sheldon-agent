@@ -263,14 +263,17 @@ class PositionComponentTests(unittest.TestCase):
         self.assertEqual(pts, 15.0)
 
     def test_staleness_grace(self):
+        # RFNE: staleness is now range efficiency. Unknown in_range over
+        # known days_open assumes half efficiency (known=True).
         pts, known = score_position_staleness({"days_open": 10}, 20.0)
-        self.assertEqual((pts, known), (20.0, True))
+        self.assertEqual((pts, known), (10.0, True))
+        # No data yet: conservatively assume full efficiency (known=True).
         pts, known = score_position_staleness({"days_open": None}, 20.0)
-        self.assertEqual(pts, 10.0)
-        self.assertFalse(known)
+        self.assertEqual((pts, known), (20.0, True))
 
     def test_staleness_erosion(self):
-        # 75 days is halfway between grace (30) and zero (120).
+        # RFNE: unknown in_range assumes half efficiency regardless of age;
+        # the old halfway-between-grace-and-zero erosion curve is gone.
         pts, _ = score_position_staleness({"days_open": 75}, 20.0)
         self.assertAlmostEqual(pts, 10.0, places=2)
 
