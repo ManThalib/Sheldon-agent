@@ -21,9 +21,9 @@ U64_MAX = (1 << 64) - 1
 STABLECOINS = {"USDC", "USDT", "USDG"}
 HIGH_CAPS = {
     "SOL", "WSOL",
-    "CBT", "WBTC", "CBBTC",
+    "BTC", "WBTC", "CBBTC",
     "ETH", "WETH",
-    "XRP", "cbRXP",
+    "XRP", "cbXRP",
     "ZEC",
     "TAO",
     "XMR",
@@ -46,9 +46,13 @@ def _is_high_cap(sym: str) -> bool:
 def score_pool_fee_yield(pool: dict, max_pts: float, apr_cap_pct: float) -> float:
     """Realized fee APR only. fee/TVL is intentionally NOT added here: it is
     the same underlying signal as `turnover` (turnover x fee rate), and
-    counting it twice double-rewards high-turnover pools."""
+    counting it twice double-rewards high-turnover pools.
+    
+    Updated: square-root curve rewards moving from 0→10% APR more than
+    50→60% APR, dampening unsustainable ultra-high APR effects."""
     apr_pct = float(pool.get("realized_fee_apr") or 0.0)
-    return round(max_pts * clamp(apr_pct / apr_cap_pct, 0.0, 1.0), 2)
+    ratio = clamp(apr_pct / apr_cap_pct, 0.0, 1.0)
+    return round(max_pts * ratio ** 0.5, 2)  # sqrt curve
 
 
 def score_pool_turnover(pool: dict, max_pts: float) -> float:
@@ -62,68 +66,61 @@ def score_pool_turnover(pool: dict, max_pts: float) -> float:
 
 
 def score_pool_depth(pool: dict, max_pts: float) -> float:
-    """Log scale between depth_min_usd and depth_max_usd."""
+    """Depth adequacy gate: sufficient liquidity to avoid slippage eating fees.
+    
+    Updated: binary gate. If TVL below minimum depth → 0 points (slippage risk).
+    TVL at or above minimum → full points (depth requirement met). Further
+    depth beyond minimum does not add reward -- this is a gate, not a reward."""
     c = get_config()["constants"]
     tvl_min = float(c["depth_min_usd"])
-    tvl_max = float(c["depth_max_usd"])
     tvl = float(pool.get("tvl") or 0.0)
     if tvl < tvl_min:
         return 0.0
-    frac = (math.log(tvl / tvl_min) / math.log(tvl_max / tvl_min))
-    return round(max_pts * clamp(frac, 0.0, 1.0), 2)
+    return round(max_pts, 2)
 
 
-TARGET_VOLATILITY_PCT = 15.0
+U64_MAX = (1 << 64) - 1
 
 
 def score_pool_volatility_fit(pool: dict, max_pts: float, peak_pct: float) -> float:
-    """Triangular curve peaking at the profile's peak volatility.
-
-    Incorporates liquidity_effectiveness concept: penalizes volatility
-    deviating from 15% target, since concentrated volatility can reduce
-    capital efficiency even if within acceptable bounds.
-    """
+    """Volatility fitness score: rewards higher volatility (more trading = more fees).
+    
+    Updated: instead of triangular curve peaking at 'peak', this uses a
+    proportional clamp. Higher vol → more fees. Vol at or above peak_pct
+    gets full points; below peak gets proportional; zero vol gets 0."""
     vol = float(pool.get("volatility") or 0.0)
     if vol <= 0:
         return 0.0
-    if vol >= 3.0 * peak_pct:
-        return 0.0
-    # Base triangular fit against profile peak
-    base = max_pts * (vol / peak_pct if vol <= peak_pct
-                       else (3.0 * peak_pct - vol) / (2.0 * peak_pct))
-    # Apply liquidity_effectiveness penalty: reward stability near 15% target
-    if TARGET_VOLATILITY_PCT > 0:
-        deviation = abs(vol - TARGET_VOLATILITY_PCT)
-        if deviation <= TARGET_VOLATILITY_PCT:
-            liquidity_bonus = 1.0 - deviation / TARGET_VOLATILITY_PCT
-        else:
-            liquidity_bonus = 0.0
-        # Fade the bonus over the viable volatility range
-        fade = max(0.0, 1.0 - vol / (3.0 * peak_pct))
-        adjusted = base * (0.7 + 0.3 * liquidity_bonus * fade)
-    else:
-        adjusted = base
-    return round(clamp(adjusted), 2)
+    # Proportional: vol at peak_pct gets full score, higher vol capped at full
+    ratio = min(vol / peak_pct, 1.0) if peak_pct > 0 else 0.0
+    return round(max_pts * ratio, 2)
 
 
 def score_pool_depeg_safety(pool: dict, max_pts: float, sym_x, sym_y) -> float:
-    """Distance of stable side(s) from $1. Worst side wins; a depegging
-    stable drains the position into the bad token. Unknown price gets
-    half credit (fail-suspicious: unseen pegs are not trusted pegs)."""
+    """Depeg risk penalty: reduces score for stablecoin drift from $1.
+    
+    Updated: instead of adding points for being pegged, this PENALTIZES
+    depeg risk. A pool at peg gets full credit; a depegged pool has its
+    score reduced by up to 50% (5% depeg = ~25% penalty, 10%+ depeg = full 50% penalty).
+    
+    per stable side: 1 - (|price - 1| / zero_dist) * 0.5, clamped to [0,1]"""
     zero_dist = float(get_config()["constants"]["depeg_zero_dist"])
-    unknown_credit = float(get_config()["constants"]["unknown_credit"])
     sides = []
     for sym, key in ((sym_x, "token_x_price_usd"), (sym_y, "token_y_price_usd")):
         if sym not in STABLECOINS:
             continue
         price = pool.get(key)
         if price is None:
-            sides.append(unknown_credit)  # unknown peg: partial credit
+            # Unknown price: apply full 50% penalty for unknown peg risk
+            sides.append(0.5)
             continue
         dist = abs(float(price) - 1.0)
-        sides.append(clamp(1.0 - dist / zero_dist, 0.0, 1.0))
+        # Penalty: each 1% depeg reduces score by 0.5%, max 50% reduction
+        side = 1.0 - (dist / zero_dist) * 0.5
+        sides.append(max(0.0, min(1.0, side)))
     if not sides:  # no stable side: component not applicable
         return round(max_pts, 2)
+    # Worst side wins (minimum score multiplier)
     return round(max_pts * min(sides), 2)
 
 

@@ -2,49 +2,96 @@
   "_comment": "Sheldon scoring configuration. Loaded at startup; invalid file = fatal error (fail-closed). Delete a key to fall back to the built-in default. Weights must sum to 100 per profile.",
   "pool_profiles": {
     "stable_stable": {
-      "weights": {"fee_yield": 35.0, "turnover": 15.0, "depth": 15.0,
-                  "depeg_safety": 25.0, "volatility_fit": 10.0},
-      "new_fc_weights": {"fee_yield_score": 35.0, "absolute_fee": 25.0,
-                        "liquidity_effectiveness": 20.0,
-                        "turnover_penalty": 10.0, "lp_share_adjustment": 10.0},
+      "weights": {
+        "fee_yield": 45.0,
+        "turnover": 15.0,
+        "depth": 5.0,
+        "depeg_safety": 15.0,
+        "volatility_fit": 20.0
+      },
+      "new_fc_weights": {
+        "fee_yield_score": 35.0,
+        "absolute_fee": 25.0,
+        "liquidity_effectiveness": 20.0,
+        "turnover_penalty": 10.0,
+        "lp_share_adjustment": 10.0
+      },
       "vol_peak_pct": 0.5,
       "apr_cap_pct": 100.0
     },
     "stable_bluechip": {
-      "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
-                  "volatility_fit": 20.0, "depeg_safety": 15.0},
-      "new_fc_weights": {"fee_yield_score": 30.0, "absolute_fee": 25.0,
-                        "liquidity_effectiveness": 20.0,
-                        "turnover_penalty": 10.0, "lp_share_adjustment": 10.0},
+      "weights": {
+        "fee_yield": 40.0,
+        "turnover": 20.0,
+        "depth": 5.0,
+        "volatility_fit": 25.0,
+        "depeg_safety": 10.0
+      },
+      "new_fc_weights": {
+        "fee_yield_score": 30.0,
+        "absolute_fee": 25.0,
+        "liquidity_effectiveness": 20.0,
+        "turnover_penalty": 10.0,
+        "lp_share_adjustment": 10.0
+      },
       "vol_peak_pct": 8.0,
       "apr_cap_pct": 300.0
     },
     "bluechip_bluechip": {
-      "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
-                  "volatility_fit": 35.0},
-      "new_fc_weights": {"fee_yield_score": 30.0, "absolute_fee": 25.0,
-                        "liquidity_effectiveness": 20.0,
-                        "turnover_penalty": 10.0, "lp_share_adjustment": 10.0},
+      "weights": {
+        "fee_yield": 40.0,
+        "turnover": 20.0,
+        "depth": 5.0,
+        "volatility_fit": 35.0
+      },
+      "new_fc_weights": {
+        "fee_yield_score": 30.0,
+        "absolute_fee": 25.0,
+        "liquidity_effectiveness": 20.0,
+        "turnover_penalty": 10.0,
+        "lp_share_adjustment": 10.0
+      },
       "vol_peak_pct": 10.0,
       "apr_cap_pct": 300.0
     }
   },
   "position_profiles": {
     "stable_stable": {
-      "weights": {"range_status": 35.0, "fee_capture": 25.0,
-                  "depeg_exposure": 25.0, "staleness": 15.0}
+      "weights": {
+        "range_status": 30.0,
+        "fee_capture": 25.0,
+        "staleness": 25.0,
+        "il_risk": 20.0,
+        "depeg_exposure": 0.0
+      }
     },
     "stable_bluechip": {
-      "weights": {"range_status": 30.0, "fee_capture": 20.0,
-                  "il_risk": 30.0, "staleness": 20.0}
+      "weights": {
+        "range_status": 30.0,
+        "fee_capture": 25.0,
+        "il_risk": 25.0,
+        "staleness": 20.0,
+        "depeg_exposure": 0.0
+      }
     },
     "bluechip_bluechip": {
-      "weights": {"range_status": 30.0, "fee_capture": 20.0,
-                  "il_risk": 30.0, "staleness": 20.0}
+      "weights": {
+        "range_status": 30.0,
+        "fee_capture": 25.0,
+        "il_risk": 25.0,
+        "staleness": 20.0,
+        "depeg_exposure": 0.0
+      }
     }
   },
-  "pool_thresholds": {"open": 70.0, "watch": 55.0},
-  "position_thresholds": {"close": 40.0, "review": 60.0},
+  "pool_thresholds": {
+    "open": 70.0,
+    "watch": 55.0
+  },
+  "position_thresholds": {
+    "close": 40.0,
+    "review": 60.0
+  },
   "constants": {
     "depth_min_usd": 50000.0,
     "depth_max_usd": 5000000.0,
@@ -65,7 +112,10 @@
     "enabled": true,
     "percentile": {
       "enabled": true,
-      "components": ["fee_yield", "turnover"],
+      "components": [
+        "fee_yield",
+        "turnover"
+      ],
       "history_scans": 60,
       "min_samples": 10,
       "blend_alpha": 0.7
@@ -111,8 +161,8 @@
     "thresholds": {
       "enabled": true,
       "min_pools": 10,
-      "open_quantile": 0.90,
-      "watch_quantile": 0.70,
+      "open_quantile": 0.9,
+      "watch_quantile": 0.7,
       "floor_open": 55.0,
       "ceil_open": 90.0,
       "floor_watch": 40.0,
@@ -124,7 +174,7 @@
       "entry_cost_bps": 50.0,
       "exit_cost_bps": 50.0,
       "claim_cost_usd": 0.02,
-      "min_pnl_margin_usd": 0.50,
+      "min_pnl_margin_usd": 0.5,
       "default_max_slippage_bps": 100.0
     }
   }

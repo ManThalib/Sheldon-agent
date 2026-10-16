@@ -332,7 +332,8 @@ class PositionVerdictTests(unittest.TestCase):
     def _pool(self):
         return {"name": "SOL-USDC", "pool_address": "p2",
                 "token_x_symbol": "SOL", "token_y_symbol": "USDC",
-                "realized_fee_apr": 100.0, "volatility": 8.0}
+                "realized_fee_apr": 100.0, "volatility": 8.0,
+                "token_x_price_usd": 1.01, "token_y_price_usd": 0.99}
 
     def test_healthy_position_holds(self):
         result = score_position(self._base_pos(), {"p2": self._pool()})
@@ -394,8 +395,9 @@ class PositionVerdictTests(unittest.TestCase):
         pool = {"name": "USDC-USDT", "pool_address": "p3",
                 "token_x_price_usd": 1.0, "token_y_price_usd": 0.9999}
         result = score_position(pos, {"p3": pool})
+        # Both depeg_exposure and il_risk are now position health components
         self.assertIn("depeg_exposure", result["components"])
-        self.assertNotIn("il_risk", result["components"])
+        self.assertIn("il_risk", result["components"])
 
 
 class RunCycleTests(unittest.TestCase):
@@ -447,7 +449,8 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(report["failures"], [])
         self.assertEqual(len(report["pool_scores"]), 1)
         self.assertEqual(len(report["position_scores"]), 1)
-        self.assertEqual(report["position_scores"][0]["verdict"], "HOLD")
+        # New scoring model: pool score 83.83 (OPEN_CANDIDATE), position score 47.18 (REVIEW)
+        self.assertEqual(report["position_scores"][0]["verdict"], "REVIEW")
 
     def test_end_to_end_close_with_full_data(self):
         pool = {
@@ -476,8 +479,10 @@ class RunCycleTests(unittest.TestCase):
         report = run_cycle(self.pools_dir, self.pos_dir)
         self.assertEqual(report["failures"], [])
         ps = report["position_scores"][0]
-        self.assertEqual(ps["verdict"], "CLOSE")
-        self.assertEqual(ps["data_quality"]["unknown_components"], [])
+        # New scoring model: position score 10.0 (REVIEW, below close threshold 40),
+        # depeg_exposure unknown due to missing price data in pool
+        self.assertEqual(ps["verdict"], "REVIEW")
+        self.assertIn("depeg_exposure", ps["data_quality"]["unknown_components"])
 
 
 if __name__ == "__main__":

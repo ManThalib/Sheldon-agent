@@ -6,10 +6,10 @@ STABLECOINS = {
 }
 
 HIGH_CAPS = {
-    "SOL", "WSOL",
-    "CBT", "WBTC", "CBBTC",
+    "SOL", "WSOL", 
+    "BTC", "WBTC", "CBBTC", 
     "ETH", "WETH",
-    "XRP", "cbRXP",
+    "XRP", "cbXRP",
     "ZEC",
     "TAO",
     "XMR",

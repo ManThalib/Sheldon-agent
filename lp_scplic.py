@@ -1,0 +1,1382 @@
+"""Sheldon's LP scoring engine (v2).
+
+Deterministic scoring for LP positions on Meteora DLMM, Raydium CLMM, and
+Orca Whirlpool. Universe policy: stablecoin and high-cap pairs only — no
+memecoins. Off-universe pools are hard-gated out before scoring.
+
+Reads the newest Missy outputs (pool scan + position scan) and produces:
+  - Pool LP Opportunity Score (0-100): is this pool worth an LP position?
+  - Position Health Score (0-100): should an open LP position stay open?
+  - Verdicts: OPEN_CANDIDATE / WATCH / IGNORE / HOLD / REVIEW / CLOSE /
+    REBALANCE / COLLECT_FEES
+
+v2 changes:
+  - Configuration externalized to profiles.json (validated; fail-closed).
+  - Open/close logic separated: missing position data caps the verdict at
+    REVIEW. CLOSE requires real evidence from known inputs. Policy-based
+    CLOSE (off-universe/unknown pair) is unaffected.
+  - Expected fees estimated from pool realized APR when Missy does not
+    provide them; fee_capture becomes a real earned/expected ratio.
+  - IL estimate approximated from pool volatility scaled by range
+    concentration when Missy does not provide il_estimate_pct.
+  - Orca fee sentinels (u64::MAX) treated as "fees unknown", never zero.
+  - Per-verdict human-readable reason; data-quality tracking.
+
+Stdlib only. Run:  python3 lp_scoring.py [--pools-dir D] [--positions-dir D] [--json]
+"""
+
+import argparse
+import glob
+import json
+import math
+import os
+import re
+import sys
+import time
+from copy import deepcopy
+from functools import lru_cache
+
+from capital import summarize_wallet
+import dynamic
+
+# --------------------------------------------------------------------------
+# Configuration — defaults mirror profiles.json. A valid profiles.json next
+# to this file overrides any subset. Invalid file => fatal (fail-closed).
+# --------------------------------------------------------------------------
+DEFAULT_CONFIG = {
+    "pool_profiles": {
+        "stable_stable": {
+            "weights": {"fee_yield": 35.0, "turnover": 15.0, "depth": 15.0,
+                        "depeg_safety": 25.0, "volatility_fit": 10.0},
+            "vol_peak_pct": 0.5,
+            "apr_cap_pct": 100.0,
+        },
+        "stable_bluechip": {
+            "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
+                        "volatility_fit": 20.0, "depeg_safety": 15.0},
+            "vol_peak_pct": 8.0,
+            "apr_cap_pct": 300.0,
+        },
+        "bluechip_bluechip": {
+            "weights": {"fee_yield": 30.0, "turnover": 20.0, "depth": 15.0,
+                        "volatility_fit": 35.0},
+            "vol_peak_pct": 10.0,
+            "apr_cap_pct": 300.0,
+        },
+    },
+    "position_profiles": {
+        "stable_stable": {
+            "weights": {"range_status": 35.0, "fee_capture": 25.0,
+                        "depeg_exposure": 25.0, "staleness": 15.0},
+        },
+        "stable_bluechip": {
+            "weights": {"range_status": 30.0, "fee_capture": 20.0,
+                        "il_risk": 30.0, "staleness": 20.0},
+        },
+        "bluechip_bluechip": {
+            "weights": {"range_status": 30.0, "fee_capture": 20.0,
+                        "il_risk": 30.0, "staleness": 20.0},
+        },
+    },
+    "pool_thresholds": {"open": 70.0, "watch": 55.0},
+    "position_thresholds": {"close": 40.0, "review": 60.0},
+    "constants": {
+        "depth_min_usd": 50000.0,
+        "depth_max_usd": 5000000.0,
+        "depeg_zero_dist": 0.005,
+        "stale_grace_days": 30.0,
+        "stale_zero_days": 120.0,
+        "collect_min_usd": 5.0,
+        "collect_pct_of_value": 0.01,
+        "turnover_max": 5.0,
+        "unknown_credit": 0.5,
+        "il_zero_pct": 10.0,
+        "il_conc_full_width_ticks": 2000,
+        "il_conc_max": 4.0,
+        "fee_expect_max_days": 30.0,
+    },
+    "dynamic": {
+        "enabled": True,
+        "percentile": {
+            "enabled": True,
+            "components": ["fee_yield", "turnover"],
+            "history_scans": 60,
+            "min_samples": 20,
+            "blend_alpha": 0.7,
+        },
+        "regime": {
+            "enabled": True,
+            "history_scans": 30,
+            "high_vol_mult": 2.0,
+            "low_vol_mult": 0.5,
+            "fee_boom_apr_pct": 100.0,
+            "shifts": {
+                "low_vol": {
+                    "fee_yield": 1.15,
+                    "turnover": 1.0,
+                    "depth": 1.05,
+                    "volatility_fit": 0.7,
+                    "depeg_safety": 1.0,
+                },
+                "high_vol": {
+                    "fee_yield": 0.8,
+                    "turnover": 1.05,
+                    "depth": 1.0,
+                    "volatility_fit": 1.4,
+                    "depeg_safety": 1.3,
+                },
+                "fee_boom": {
+                    "fee_yield": 0.7,
+                    "turnover": 1.2,
+                    "depth": 1.2,
+                    "volatility_fit": 1.0,
+                    "depeg_safety": 1.1,
+                },
+                "cracked_peg": {
+                    "fee_yield": 0.6,
+                    "turnover": 1.0,
+                    "depth": 1.0,
+                    "volatility_fit": 0.9,
+                    "depeg_safety": 2.0,
+                },
+                "neutral": {},
+            },
+        },
+        "thresholds": {
+            "enabled": True,
+            "min_pools": 10,
+            "open_quantile": 0.90,
+            "watch_quantile": 0.70,
+            "floor_open": 55.0,
+            "ceil_open": 90.0,
+            "floor_watch": 40.0,
+            "ceil_watch": 80.0,
+        },
+        "position_pnl": {
+            "enabled": True,
+            "horizon_days": 1.0,
+            "entry_cost_bps": 50.0,
+            "exit_cost_bps": 50.0,
+            "claim_cost_usd": 0.02,
+            "min_pnl_margin_usd": 0.01,
+        },
+    },
+}
+
+U64_MAX = (1 << 64) - 1
+
+
+class ConfigError(Exception):
+    """Raised when profiles.json is present but invalid."""
+
+
+def _validate_config(cfg: dict) -> None:
+    """Fail-closed validation. Raises ConfigError on any violation."""
+    for section in ("pool_profiles", "position_profiles"):
+        profiles = cfg.get(section)
+        if not isinstance(profiles, dict) or not profiles:
+            raise ConfigError(f"{section}: missing or empty")
+        for name, prof in profiles.items():
+            w = prof.get("weights") if isinstance(prof, dict) else None
+            if not isinstance(w, dict) or not w:
+                raise ConfigError(f"{section}.{name}: weights missing")
+            total = sum(float(v) for v in w.values())
+            if abs(total - 100.0) > 0.01:
+                raise ConfigError(
+                    f"{section}.{name}: weights sum to {total}, expected 100")
+            for key, val in w.items():
+                if float(val) < 0:
+                    raise ConfigError(f"{section}.{name}.{key}: negative weight")
+
+    pt = cfg.get("pool_thresholds") or {}
+    if not ("watch" in pt and "open" in pt and float(pt["watch"]) <= float(pt["open"])):
+        raise ConfigError("pool_thresholds: need watch <= open")
+    st = cfg.get("position_thresholds") or {}
+    if not ("close" in st and "review" in st and float(st["close"]) <= float(st["review"])):
+        raise ConfigError("position_thresholds: need close <= review")
+
+    c = cfg.get("constants") or {}
+    if float(c.get("depth_min_usd", 0)) <= 0 or \
+       float(c["depth_min_usd"]) >= float(c.get("depth_max_usd", 0)):
+        raise ConfigError("constants: need 0 < depth_min_usd < depth_max_usd")
+    if float(c.get("stale_grace_days", 0)) >= float(c.get("stale_zero_days", 0)):
+        raise ConfigError("constants: need stale_grace_days < stale_zero_days")
+    for key in ("depeg_zero_dist", "il_zero_pct", "fee_expect_max_days"):
+        if float(c.get(key, 0)) <= 0:
+            raise ConfigError(f"constants.{key}: must be > 0")
+
+    d = cfg.get("dynamic") or {}
+    if d:
+        if not isinstance(d, dict):
+            raise ConfigError("dynamic: expected object")
+        pctl = d.get("percentile") or {}
+        if pctl:
+            alpha = float(pctl.get("blend_alpha", 0.7))
+            if not 0.0 <= alpha <= 1.0:
+                raise ConfigError("dynamic.percentile.blend_alpha must be in [0,1]")
+        thr = d.get("thresholds") or {}
+        if thr:
+            for q in ("open_quantile", "watch_quantile"):
+                if not 0.0 <= float(thr.get(q, 0.5)) <= 1.0:
+                    raise ConfigError(f"dynamic.thresholds.{q} must be in [0,1]")
+            if float(thr.get("watch_quantile", 0.5)) > float(thr.get("open_quantile", 0.5)):
+                raise ConfigError("dynamic.thresholds.watch_quantile must <= open_quantile")
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = deepcopy(base)
+    for key, val in (override or {}).items():
+        if key.startswith("_"):
+            continue
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], val)
+        else:
+            out[key] = deepcopy(val)
+    return out
+
+
+def load_config(path: str) -> dict:
+    """Load profiles.json over defaults. Missing file => defaults.
+    Invalid JSON or failed validation => ConfigError."""
+    if not os.path.exists(path):
+        return deepcopy(DEFAULT_CONFIG)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            user = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"{path}: unreadable ({exc})") from exc
+    if not isinstance(user, dict):
+        raise ConfigError(f"{path}: expected a JSON object")
+    cfg = _deep_merge(DEFAULT_CONFIG, user)
+    _validate_config(cfg)
+    return cfg
+
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "profiles.json")
+_CONFIG = load_config(_CONFIG_PATH)
+
+
+def set_config(cfg: dict) -> None:
+    """Replace the active configuration (used by tests). Validates first."""
+    _validate_config(cfg)
+    global _CONFIG
+    _CONFIG = cfg
+
+
+def get_config() -> dict:
+    return _CONFIG
+
+
+# --------------------------------------------------------------------------
+# Universe policy — stablecoins and high-caps only, no memes.
+# --------------------------------------------------------------------------
+STABLECOINS = {
+    "USDC", "USDT", "USDG"
+}
+
+HIGH_CAPS = {
+    "SOL", "WSOL",
+    "BTC", "WBTC", "CBBTC",
+    "ETH", "WETH",
+    "XRP", "cbXRP",
+    "ZEC",
+    "TAO",
+    "XMR",
+    "BMT",
+    "QNT",
+    "VIRTUAL",
+    "ZBCN",
+    "GRASS"
+}
+
+
+SUPPORTED_DEXES = {"meteora", "raydium", "orca"}
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+def newest_file(directory: str, prefix: str):
+    # Sort by modification time, not filename, so that parallel file families
+    # (e.g. wallet_screen vs wallet_screen-mirror1) are selected by freshness.
+    # Ties (identical mtimes, e.g. Missy copying scans) break by newest
+    # filename; the fixed-width timestamp prefix makes that deterministic.
+    paths = sorted(
+        (p for p in glob.glob(os.path.join(directory, prefix + "-*.json"))
+         if not p.endswith((".failed", ".invalid"))),
+        key=lambda p: (os.path.getmtime(p), os.path.basename(p)),
+    )
+    return paths[-1] if paths else None
+
+
+def load_wallet_scan(directory: str) -> dict:
+    """Load and parse the newest Missy wallet scan.
+
+    Returns a capital summary dict (see capital.summarize_wallet).
+    On missing/malformed data, returns a zeroed summary with an error.
+    """
+    path = newest_file(directory, "wallet_screen")
+    if not path:
+        return _empty_wallet("no wallet scan found")
+    try:
+        data = load_json(path)
+    except Exception as exc:
+        return _empty_wallet(f"wallet scan unreadable: {exc}")
+    try:
+        summary = summarize_wallet(data)
+        summary["source"] = path
+        return summary
+    except Exception as exc:
+        return _empty_wallet(f"wallet scan malformed: {exc}")
+
+
+def _empty_wallet(reason: str) -> dict:
+    return {
+        "wallet": None,
+        "total_usd": 0.0,
+        "idle_usdc": 0.0,
+        "dust_total_usdc": 0.0,
+        "dust_assets": [],
+        "reserved_total_usdc": 0.0,
+        "deployable_usdc": 0.0,
+        "errors": [reason],
+        "source": None,
+    }
+
+
+def load_json(path: str):
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, value))
+
+
+def is_fresh(path: str, max_age_seconds: float) -> bool:
+    try:
+        return (time.time() - os.path.getmtime(path)) <= max_age_seconds
+    except OSError:
+        return False
+
+
+_PAIR_SPLIT_RE = re.compile(r"[-/]")
+
+
+def pair_symbols(name: str):
+    """Extract (symbol_x, symbol_y) from a pool name like 'SOL-USDC (bin 4)'."""
+    if not name:
+        return None, None
+    base = name.split("(", 1)[0].strip()
+    parts = [p.strip().upper() for p in _PAIR_SPLIT_RE.split(base) if p.strip()]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return None, None
+
+
+@lru_cache(maxsize=4096)
+def _classify_cached(sym_x, sym_y, name):
+    if not sym_x or not sym_y:
+        name_x, name_y = pair_symbols(name)
+        sym_x = sym_x or name_x
+        sym_y = sym_y or name_y
+    if not sym_x or not sym_y:
+        return "unknown", sym_x, sym_y
+    in_x = sym_x in STABLECOINS or sym_x in HIGH_CAPS
+    in_y = sym_y in STABLECOINS or sym_y in HIGH_CAPS
+    if not in_x or not in_y:
+        return "off_universe", sym_x, sym_y
+    x_stable = sym_x in STABLECOINS
+    y_stable = sym_y in STABLECOINS
+    if x_stable and y_stable:
+        return "stable_stable", sym_x, sym_y
+    if x_stable or y_stable:
+        return "stable_bluechip", sym_x, sym_y
+    return "bluechip_bluechip", sym_x, sym_y
+
+
+def classify_pair(record: dict):
+    """Return (pair_class, sym_x, sym_y). Cached per symbol/name triple."""
+    sym_x = (record.get("token_x_symbol") or "").upper() or None
+    sym_y = (record.get("token_y_symbol") or "").upper() or None
+    name = record.get("name") or record.get("pool_name") or ""
+    return _classify_cached(sym_x, sym_y, name)
+
+
+# --------------------------------------------------------------------------
+# Pool LP Opportunity Score
+# --------------------------------------------------------------------------
+def load_scoring_policy() -> dict:
+    """Read the versioned scoring identity from sheldon_policy.json.
+
+    Defaults to local scoring v0 when the manifest is missing or unreadable
+    (fail-open for the identity block only; scoring itself still works).
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "sheldon_policy.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            block = (json.load(fh).get("scoring") or {})
+    except Exception:
+        block = {}
+    return {
+        "source": str(block.get("source", "local")).lower(),
+        "version": int(block.get("version") or 0),
+        "min_open_score": float(block.get("min_open_score") or 70.0),
+        "position_source": str(block.get("position_source", "local")).lower(),
+        "position_features_version": int(block.get("position_features_version") or 1),
+    }
+
+
+def _missy_components(pool: dict) -> dict:
+    """Map Missy's score_breakdown keys to Sheldon-style component names."""
+    breakdown = pool.get("score_breakdown") or {}
+    mapping = {
+        "yield_score": "fee_yield",
+        "depth_score": "depth",
+        "efficiency_score": "turnover",
+        "risk_score": "volatility_fit",
+    }
+    out = {}
+    for src, dst in mapping.items():
+        val = breakdown.get(src)
+        if val is not None:
+            out[dst] = float(val)
+    return out
+
+
+def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
+    """Use Missy's default score directly, preserving local verdict thresholds.
+
+    Falls back to Sheldon's local scoring when the pool record does not
+    yet contain a Missy score (legacy scans or tests).
+
+    Policy gates are NOT outsourced: the universe hard-gate applies here
+    exactly as in score_pool (a high Missy score never opens an
+    off-universe pool), and Missy's own eligible=false discovery gates
+    block OPEN_CANDIDATE (score kept for audit, verdict capped at IGNORE).
+    """
+    if "score" not in pool:
+        return score_pool(pool, ctx)
+    # Missy owns classification; trust its tag when present, else local.
+    pair_class, sym_x, sym_y = classify_pair(pool)
+    if pool.get("pair_class"):
+        pair_class = pool["pair_class"]
+    score = float(pool.get("score") or 0.0)
+    policy = load_scoring_policy()
+
+    if pair_class in ("off_universe", "unknown"):
+        return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
+                "dex": pool.get("dex"), "pair_class": pair_class,
+                "pair": [sym_x, sym_y], "score": 0.0, "components": {},
+                "reason": "off-universe pair: policy is stables/high-caps only",
+                "verdict": "IGNORE", "_pool": pool,
+                "score_policy": {"source": policy["source"],
+                                 "version": policy["version"]},
+                "dynamic": {"regime": None, "thresholds": "static"}}
+
+    thresholds = (ctx or {}).get("thresholds") or get_config()["pool_thresholds"]
+    verdict = pool_verdict(score, thresholds)
+    reasons = []
+    if verdict == "OPEN_CANDIDATE" and pool.get("eligible") is False:
+        verdict = "IGNORE"
+        reasons.append(
+            f"score {score} >= open threshold but Missy gate rejected: "
+            f"{pool.get('rejected_reason') or 'eligible=false'}")
+    elif verdict == "OPEN_CANDIDATE":
+        reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
+    return {
+        "pool": pool.get("name"),
+        "pool_address": pool.get("pool_address"),
+        "dex": pool.get("dex"),
+        "pair_class": pair_class,
+        "pair": [sym_x, sym_y],
+        "score": score,
+        "components": _missy_components(pool),
+        "score_policy": {"source": policy["source"], "version": policy["version"]},
+        "reason": "; ".join(reasons) if reasons else "Missy default score consumed",
+        "verdict": verdict,
+        "_pool": pool,
+        "dynamic": {"regime": None, "thresholds": "static"},
+    }
+
+
+def score_pool_fee_yield(pool: dict, max_pts: float, apr_cap_pct: float) -> float:
+    """Realized fee APR only. fee/TVL is intentionally NOT added here: it is
+    the same underlying signal as `turnover` (turnover x fee rate), and
+    counting it twice double-rewards high-turnover pools."""
+    apr_pct = float(pool.get("realized_fee_apr") or 0.0)
+    return round(max_pts * clamp(apr_pct / apr_cap_pct, 0.0, 1.0), 2)
+
+
+def score_pool_turnover(pool: dict, max_pts: float) -> float:
+    """Window volume / TVL. `turnover_max` over the window maxes out."""
+    tvl = float(pool.get("tvl") or 0.0)
+    volume = float(pool.get("volume_window") or 0.0)
+    if tvl <= 0:
+        return 0.0
+    cap = float(get_config()["constants"]["turnover_max"])
+    return round(max_pts * clamp((volume / tvl) / cap, 0.0, 1.0), 2)
+
+
+def score_pool_depth(pool: dict, max_pts: float) -> float:
+    """Log scale between depth_min_usd and depth_max_usd."""
+    c = get_config()["constants"]
+    tvl_min = float(c["depth_min_usd"])
+    tvl_max = float(c["depth_max_usd"])
+    tvl = float(pool.get("tvl") or 0.0)
+    if tvl < tvl_min:
+        return 0.0
+    frac = (math.log(tvl / tvl_min) / math.log(tvl_max / tvl_min))
+    return round(max_pts * clamp(frac, 0.0, 1.0), 2)
+
+
+def score_pool_volatility_fit(pool: dict, max_pts: float, peak_pct: float) -> float:
+    """Triangular curve peaking at the profile's peak volatility."""
+    vol = float(pool.get("volatility") or 0.0)
+    if vol <= 0:
+        return 0.0
+    if vol >= 3.0 * peak_pct:
+        return 0.0
+    score = max_pts * (vol / peak_pct if vol <= peak_pct
+                       else (3.0 * peak_pct - vol) / (2.0 * peak_pct))
+    return round(clamp(score), 2)
+
+
+def score_pool_depeg_safety(pool: dict, max_pts: float, sym_x, sym_y) -> float:
+    """Distance of stable side(s) from $1. Worst side wins; a depegging
+    stable drains the position into the bad token. Unknown price gets
+    half credit (fail-suspicious: unseen pegs are not trusted pegs)."""
+    zero_dist = float(get_config()["constants"]["depeg_zero_dist"])
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+    sides = []
+    for sym, key in ((sym_x, "token_x_price_usd"), (sym_y, "token_y_price_usd")):
+        if sym not in STABLECOINS:
+            continue
+        price = pool.get(key)
+        if price is None:
+            sides.append(unknown_credit)  # unknown peg: partial credit
+            continue
+        dist = abs(float(price) - 1.0)
+        sides.append(clamp(1.0 - dist / zero_dist, 0.0, 1.0))
+    if not sides:  # no stable side: component not applicable
+        return round(max_pts, 2)
+    return round(max_pts * min(sides), 2)
+
+
+def pool_verdict(score: float, thresholds: dict) -> str:
+    """Map a pool score to a verdict given thresholds."""
+    if score >= thresholds["open"]:
+        return "OPEN_CANDIDATE"
+    if score >= thresholds["watch"]:
+        return "WATCH"
+    return "IGNORE"
+
+
+def _maybe_blend(name: str, abs_pts: float, max_pts: float, raw_value: float,
+                 pair_class: str, ctx: dict) -> float:
+    """Blend absolute component score with rolling percentile, if available."""
+    if not ctx or not max_pts:
+        return abs_pts
+    norms = (ctx.get("norms") or {}).get(pair_class)
+    if norms is None or name not in norms:
+        return abs_pts
+    rank = dynamic.percentile_rank(norms[name], raw_value)
+    alpha = float(ctx.get("blend_alpha", 0.7))
+    norm_abs = abs_pts / max_pts if max_pts else 0.0
+    return round(max_pts * (alpha * rank + (1.0 - alpha) * norm_abs), 2)
+
+
+def score_pool(pool: dict, ctx: dict = None) -> dict:
+    cfg = get_config()
+    pair_class, sym_x, sym_y = classify_pair(pool)
+    static_thr = cfg["pool_thresholds"]
+    adaptive_thr = (ctx or {}).get("thresholds")
+    thresholds = adaptive_thr if adaptive_thr else static_thr
+    regime_name = ((ctx or {}).get("regime") or {}).get("name")
+
+    if pair_class in ("off_universe", "unknown"):
+        return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
+                "dex": pool.get("dex"), "pair_class": pair_class,
+                "pair": [sym_x, sym_y], "score": 0.0, "components": {},
+                "reason": "off-universe pair: policy is stables/high-caps only",
+                "verdict": "IGNORE", "_pool": pool,
+                "dynamic": {"regime": regime_name, "thresholds": "static"}}
+
+    profile = cfg["pool_profiles"][pair_class]
+    w = (ctx or {}).get("weights", {}).get(pair_class) or profile["weights"]
+    reasons = []
+
+    fee_abs = score_pool_fee_yield(pool, w["fee_yield"], profile["apr_cap_pct"])
+    turnover_abs = score_pool_turnover(pool, w["turnover"])
+    turnover_raw = 0.0
+    if float(pool.get("tvl") or 0.0) > 0:
+        turnover_raw = float(pool.get("volume_window") or 0.0) / float(pool.get("tvl"))
+
+    components = {
+        "fee_yield": _maybe_blend("fee_yield", fee_abs, w["fee_yield"],
+                                   float(pool.get("realized_fee_apr") or 0.0),
+                                   pair_class, ctx),
+        "turnover": _maybe_blend("turnover", turnover_abs, w["turnover"],
+                                 turnover_raw, pair_class, ctx),
+        "depth": score_pool_depth(pool, w["depth"]),
+        "volatility_fit": score_pool_volatility_fit(
+            pool, w["volatility_fit"], profile["vol_peak_pct"]),
+    }
+    if "depeg_safety" in w:
+        components["depeg_safety"] = score_pool_depeg_safety(
+            pool, w["depeg_safety"], sym_x, sym_y)
+
+    if float(pool.get("realized_fee_apr") or 0.0) <= 0:
+        reasons.append("no realized fee APR in scan")
+    if float(pool.get("volatility") or 0.0) <= 0:
+        reasons.append("volatility unknown")
+
+    total = round(clamp(sum(components.values())), 2)
+    verdict = pool_verdict(total, thresholds)
+    if verdict == "OPEN_CANDIDATE":
+        reasons.append(f"score {total} >= open threshold {thresholds['open']}")
+    return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
+            "dex": pool.get("dex"), "pair_class": pair_class,
+            "pair": [sym_x, sym_y], "score": total, "components": components,
+            "reason": "; ".join(reasons) if reasons else "all inputs present",
+            "verdict": verdict, "_pool": pool,
+            "dynamic": {"regime": regime_name,
+                        "thresholds": ("adaptive" if adaptive_thr else "static")}}
+
+
+# --------------------------------------------------------------------------
+# Position Health Score
+#
+# Every component returns (points, known) where `known` is False when the
+# component ran on missing/unusable inputs. Missing data still contributes
+# neutral credit to the score but caps the verdict at REVIEW: CLOSE requires
+# evidence from real data, never from absent data.
+# --------------------------------------------------------------------------
+def _pos_price_bounds(pos: dict) -> tuple:
+    lower = pos.get("lower_price")
+    upper = pos.get("upper_price")
+    current = pos.get("current_price")
+    if lower is None or upper is None or current is None:
+        return None, None, None
+    return float(lower), float(upper), float(current)
+
+
+def _fees_usd_or_none(pos: dict):
+    """Fees in USD, or None when unknown.
+
+    A raw sentinel (u64::MAX or larger) in fees_owed_raw means the decoder
+    failed: fees are unknown, not zero. Missing fees_usd is unknown too.
+    """
+    fees = pos.get("fees_usd")
+    raw = pos.get("fees_owed_raw") or []
+    if any(isinstance(v, (int, float)) and v >= U64_MAX for v in raw):
+        return None
+    if fees is None:
+        return None
+    return float(fees)
+
+
+def _range_concentration(pos: dict) -> float:
+    """Concentration multiplier from range width in ticks/bins.
+
+    A range as wide as il_conc_full_width_ticks behaves like a full-range
+    position (1.0x); narrower ranges amplify IL up to il_conc_max."""
+    c = get_config()["constants"]
+    full = float(c["il_conc_full_width_ticks"])
+    conc_max = float(c["il_conc_max"])
+    lower = pos.get("lower_bound")
+    upper = pos.get("upper_bound")
+    if lower is None or upper is None:
+        return conc_max  # unknown width: assume concentrated (conservative)
+    width = float(upper) - float(lower)
+    if width <= 0:
+        return conc_max
+    return clamp(full / width, 1.0, conc_max)
+
+
+def estimate_il_pct(pos: dict, pool: dict, days_open) -> tuple:
+    """Return (il_estimate_pct, source).
+
+    Uses Missy's il_estimate_pct when present. Otherwise approximates from
+    pool daily volatility using the concentrated-LP quadratic loss
+    approximation: IL% ≈ conc * (vol_daily/100)^2 / 8 * 100 * days.
+    """
+    reported = pos.get("il_estimate_pct")
+    if reported is not None:
+        return float(reported), "reported"
+    vol = float((pool or {}).get("volatility") or 0.0)
+    if vol <= 0 or days_open is None or days_open <= 0:
+        return None, "unknown"
+    conc = _range_concentration(pos)
+    il = conc * (vol / 100.0) ** 2 / 8.0 * 100.0 * float(days_open)
+    return il, "estimated"
+
+
+def estimate_expected_fees(pos: dict, pool: dict, fees_usd_known: bool) -> tuple:
+    """Return (expected_fees_usd, source).
+
+    Uses Missy's expected_fees_usd when present. Otherwise estimates from
+    position value and pool realized APR over min(days_open, cap):
+        expected = value * apr/100 * min(days, fee_expect_max_days) / 365
+    """
+    expected = pos.get("expected_fees_usd")
+    if expected is not None and float(expected) > 0:
+        return float(expected), "reported"
+    value = pos.get("current_value_usd")
+    apr = float((pool or {}).get("realized_fee_apr") or 0.0)
+    days = pos.get("days_open")
+    cap = float(get_config()["constants"]["fee_expect_max_days"])
+    if value is None or float(value) <= 0 or apr <= 0 or days is None:
+        return None, "unknown"
+    days = min(float(days), cap)
+    return float(value) * (apr / 100.0) * days / 365.0, "estimated"
+
+
+def score_position_range_status(pos: dict, max_pts: float) -> tuple:
+    """In-range earns fees; distance-to-boundary discounts positions about
+    to flip single-sided. Missing data scores partial credit and flags
+    unknown (fail-closed on data quality, not on the position).
+
+    An RPC-failed scan (null tick bounds from a fallback/historical record)
+    is unknown data, not out-of-range evidence: null bounds must never
+    score 0 and must never read as verifiably out-of-range.
+
+    When the record carries Missy's edge_distance_frac (0 at center, 1 at
+    boundary) and no price bounds, that feature drives a centering curve:
+    center = full credit, edge = zero. Local records without it keep the
+    flat full-credit in-range behavior.
+    """
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+    lower, upper, current = _pos_price_bounds(pos)
+    if lower is not None and upper > lower:
+        if not (lower <= current <= upper):
+            return 0.0, True
+        span = upper - lower
+        edge_dist = min(current - lower, upper - current) / (span / 2.0)
+        # edge_frac: 1 at center, 0 at boundary (inherited from existing code). Linear reward: 1.0 at center, 0.0 at edge. Old formula 0.6+0.4*edge_frac rewarded being close to edge; new formula gives full credit at center and zero at edge.        # centered: 1 - edge_frac gives 1.0 at center, 0.0 at edge.
+        edge_frac = clamp((edge_dist - 0.0) / 0.5, 0.0, 1.0)
+        return round(max_pts * edge_frac, 2), True
+    edge = pos.get("edge_distance_frac")
+    if "in_range" in pos and pos["in_range"] is not None:
+        # A fallback record with null tick bounds reports in_range=false
+        # only because the scanner could not decode the range. Treat that
+        # as unknown data (partial credit), not as out-of-range evidence.
+        bounds_missing = pos.get("lower_bound") is None or pos.get("upper_bound") is None
+        if bounds_missing and not pos["in_range"]:
+            return round(max_pts * unknown_credit, 2), False
+        if not pos["in_range"]:
+            return 0.0, True
+        if isinstance(edge, (int, float)):
+            edge_frac = clamp(float(edge), 0.0, 1.0)
+            # New: centering reward — 1.0 at center, 0.0 at edge
+            return round(max_pts * edge_frac, 2), True
+        return round(max_pts, 2), True
+    return round(max_pts * unknown_credit, 2), False
+
+
+def score_position_fee_capture(pos: dict, max_pts: float, pool: dict) -> tuple:
+    """Fees earned vs expected, with APR normalization for fair comparison
+    across pools with different fee rates.
+
+    Efficiency = (daily fee yield) / (pool's potential daily yield from APR).
+    A position in a 10% APR pool capturing 40% of fees is more impressive
+    than one in a 2% APR pool capturing 80% of fees.
+
+    Falls back to raw ratio if APR-normalization data is unavailable.
+    """
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+    fees = _fees_usd_or_none(pos)
+    if fees is None:
+        return round(max_pts * unknown_credit, 2), False
+    expected, source = estimate_expected_fees(pos, pool, fees_usd_known=True)
+    if expected is None or expected <= 0:
+        return round(max_pts * unknown_credit, 2), False
+    ratio = fees / expected
+
+    # APR normalization: compare fee yield to pool's realized APR potential.
+    pool_apr = float((pool or {}).get("realized_fee_apr") or 0.01)
+    value = pos.get("current_value_usd")
+    days = pos.get("days_open")
+    if value is not None and float(value) > 0 and days is not None and float(days) > 0:
+        daily_fee_yield = float(fees) / float(days)
+        pool_daily_yield = float(value) * (pool_apr / 100.0) / 365.0
+        if pool_daily_yield > 0:
+            efficiency = daily_fee_yield / pool_daily_yield
+            # Normalized efficiency: 1.0 = captured full APR yield,
+            # 0.5 = captured half, etc. Cap at 2x so very high captures
+            # don't dominate, then blend with the raw capture ratio.
+            efficiency_norm = clamp(efficiency, 0.0, 2.0)
+            # Blend: 70% efficiency, 30% raw ratio for balanced signaling
+            blended = 0.7 * efficiency_norm + 0.3 * ratio
+            return round(max_pts * clamp(blended, 0.0, 1.0), 2), True
+
+    # Fallback: original ratio when APR data is missing
+    return round(max_pts * clamp(ratio, 0.0, 1.0), 2), True
+
+
+def score_position_il_risk(pos: dict, max_pts: float, pool: dict) -> tuple:
+    """Net yield coverage: whether fees cover impermanent loss.
+
+    Positive net yield (fees > IL) scores above baseline.
+    Break-even (fees ≈ IL) scores at baseline.
+    Negative net yield (IL > fees) scores below baseline.
+
+    This replaces the old IL‑as‑pure‑penalty model with a profitability
+    signal: a position that earns more in fees than it loses to IL is
+    objectively healthy, regardless of IL magnitude.
+    """
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+    days = pos.get("days_open")
+    il, _source = estimate_il_pct(pos, pool, days)
+    if il is None:
+        return round(max_pts * unknown_credit, 2), False
+
+    fees = _fees_usd_or_none(pos)
+    value = pos.get("current_value_usd")
+
+    # Compute net yield percentage: (fees - IL) / value
+    # If fees is unknown, treat IL as full penalty (net yield = -il%)
+    if fees is None or value is None or float(value) <= 0:
+        # Can't compute net yield; return unknown credit
+        return round(max_pts * unknown_credit, 2), False
+
+    net_yield_pct = (float(fees) - float(il)) / float(value)
+    # Map to score: 1.0 = break-even, >1 = profitable, <1 = losing
+    # clamp to [0, 2] so large negatives don't zero-out the whole score
+    coverage = clamp(1.0 + net_yield_pct, 0.0, 2.0)
+    return round(max_pts * coverage, 2), True
+
+
+def score_position_depeg_exposure(pos: dict, max_pts: float, sym_x, sym_y,
+                                  pool: dict) -> tuple:
+    """Stable/stable IL is depeg risk. Full credit when both pegs hold and
+    the position is two-sided; penalized when single-sided in a depegged
+    token (the exit already happened, against you)."""
+    zero_dist = float(get_config()["constants"]["depeg_zero_dist"])
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+
+    def peg_frac(sym, pool_key):
+        if sym not in STABLECOINS:
+            return 1.0
+        price = None
+        if pool:
+            price = pool.get(pool_key)
+        if price is None:
+            return unknown_credit  # unseen peg: partial credit, flag below
+        return clamp(1.0 - abs(float(price) - 1.0) / zero_dist, 0.0, 1.0)
+
+    known = True
+    for sym in (sym_x, sym_y):
+        if sym in STABLECOINS and (not pool or pool.get(
+                "token_x_price_usd" if sym == sym_x else "token_y_price_usd") is None):
+            known = False
+
+    fx = peg_frac(sym_x, "token_x_price_usd")
+    fy = peg_frac(sym_y, "token_y_price_usd")
+
+    # Single-sided detection: Missy's feature vector first, token-amount
+    # fallback for local records.
+    held_x = None
+    single_sided = pos.get("single_sided")
+    if single_sided is None:
+        ui_x = ui_y = None
+        tx, ty = pos.get("token_x_amount"), pos.get("token_y_amount")
+        try:
+            ui_x = float((tx or {}).get("ui")) if tx else None
+            ui_y = float((ty or {}).get("ui")) if ty else None
+        except (TypeError, ValueError):
+            ui_x = ui_y = None
+        if ui_x is not None and ui_y is not None and (ui_x > 0) != (ui_y > 0):
+            single_sided = True
+            held_x = ui_x > 0
+        else:
+            single_sided = False
+    else:
+        bias = pos.get("side_bias_x")
+        if isinstance(bias, (int, float)):
+            held_x = float(bias) > 0.5
+
+    if single_sided:
+        # You're 100% in one token; your exit already happened against the
+        # peg of whichever side you hold.
+        if held_x is None:
+            return round(max_pts * min(fx, fy), 2), False
+        held = fx if held_x else fy
+        return round(max_pts * held, 2), known
+    return round(max_pts * min(fx, fy), 2), known
+
+
+def score_position_staleness(pos: dict, max_pts: float) -> tuple:
+    """Range efficiency: proportion of time the position has spent in-range
+    over its lifetime. Positions that have consistently stayed within bounds
+    reward confidence in range selection; those that frequently exit are
+    viewed as less robust.
+
+    This replaces the old staleness-eager-penalty model with a range
+    efficiency signal: age alone does not hurt a position that has proven
+    its range selection by staying in-range.
+    """
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+    in_range_days = pos.get("in_range_days")
+    total_days = pos.get("days_open")
+
+    if total_days is None or float(total_days) <= 0:
+        # No data yet: conservatively assume full efficiency
+        return round(max_pts, 2), True
+
+    total_days = float(total_days)
+    in_range = False is None and pos.get("in_range") is not None
+
+    # Determine in-range days:
+    # If the record explicitly tracks in_range_days, use it.
+    # Otherwise, if in_range is known True and days_open is available,
+    # assume all days were in-range (conservative).
+    # If in_range is known False, zero in-range days.
+    # If in_range is unknown, assume partial efficiency.
+    if in_range_days is not None:
+        try:
+            in_range_days = float(in_range_days)
+            if in_range_days < 0:
+                in_range_days = 0.0
+        except (TypeError, ValueError):
+            in_range_days = None
+    else:
+        # Infer from in_range flag
+        in_range_flag = pos.get("in_range")
+        if in_range_flag is True:
+            in_range_days = total_days  # assume all days in range
+        elif in_range_flag is False:
+            in_range_days = 0.0
+        else:
+            # Unknown: assume half efficiency
+            in_range_days = total_days * 0.5
+
+    efficiency_pct = in_range_days / total_days
+    # Clamp to [0, 1] and score
+    efficiency_pct = clamp(efficiency_pct, 0.0, 1.0)
+    return round(max_pts * efficiency_pct, 2), True
+
+
+def score_position(pos: dict, pools_by_addr: dict = None, ctx: dict = None) -> dict:
+    """Local scoring path: derive inputs from the raw position record."""
+    pair_class, sym_x, sym_y = classify_pair(pos)
+    pool = (pools_by_addr or {}).get(pos.get("pool_address"))
+    if pool is not None and pair_class == "unknown":
+        pair_class, _, _ = classify_pair(pool)
+    pool_name = pos.get("pool_name") or pos.get("name") or (pool or {}).get("name")
+
+    if pair_class in ("off_universe", "unknown"):
+        result = _position_policy_close(pos, pool_name, pair_class, sym_x, sym_y)
+        result["score_policy"] = {"source": "local", "features_version": 0}
+        return result
+
+    result = _score_position_core(pos, pool, pool_name, pair_class, sym_x, sym_y, ctx)
+    result["score_policy"] = {"source": "local", "features_version": 0}
+    return result
+
+
+def score_position_missy(pos: dict, pools_by_addr: dict = None,
+                         ctx: dict = None) -> dict:
+    """Missy-feature scoring path (scoring.position_source = "missy").
+
+    Sheldon still owns the policy: profile weights, thresholds, verdicts,
+    open/close separation. Only the *inputs* come from Missy's versioned
+    position_features block; feature gaps surface as unknown components and
+    cap the verdict exactly like any other missing data. Falls back to the
+    local path when the block is missing or its version differs.
+    """
+    policy = load_scoring_policy()
+    features = pos.get("position_features")
+    if (not isinstance(features, dict)
+            or int(features.get("version") or 0) != policy["position_features_version"]):
+        result = score_position(pos, pools_by_addr, ctx)
+        result["score_policy"] = {
+            "source": "local", "features_version": 0,
+            "fallback_reason": "position_features missing or version mismatch"}
+        return result
+
+    pool = (pools_by_addr or {}).get(
+        features.get("pool_address") or pos.get("pool_address"))
+    pair_class, sym_x, sym_y = classify_pair(features)
+    if pair_class == "unknown" and pool is not None:
+        # Features carry no symbols: take class AND symbols from the pool
+        # record so stable-side policy (depeg exposure) can fire.
+        pair_class, sym_x, sym_y = classify_pair(pool)
+    pool_name = (pool or {}).get("name")
+
+    if pair_class in ("off_universe", "unknown"):
+        result = _position_policy_close(
+            {"position_id": features.get("position_address") or pos.get("position_address"),
+             "pool_address": features.get("pool_address") or pos.get("pool_address")},
+            pool_name, pair_class, sym_x, sym_y)
+        result["score_policy"] = {
+            "source": "missy", "features_version": policy["position_features_version"]}
+        return result
+
+    view = _view_from_features(pos, features)
+    result = _score_position_core(
+        view, pool, pool_name, pair_class, sym_x, sym_y, ctx,
+        extra_unknown=[g for g in (features.get("gaps") or [])
+                       if isinstance(g, str)])
+    result["score_policy"] = {
+        "source": "missy", "features_version": policy["position_features_version"]}
+    return result
+
+
+def _view_from_features(pos: dict, features: dict) -> dict:
+    """Map Missy's feature vector onto the keys the scoring policy reads.
+
+    Format adaptation only — no scoring decisions here. Prices come from the
+    raw position record (the feature vector does not carry them) and feed the
+    expected-PnL verdict; absent prices (RPC-fallback scans) stay None and
+    route through the policy's existing unknown-data paths. Token amounts and
+    il/fee estimates remain deliberately absent.
+    """
+    gaps = set(features.get("gaps") or [])
+    return {
+        "position_id": features.get("position_address") or pos.get("position_address"),
+        "pool_address": features.get("pool_address") or pos.get("pool_address"),
+        "in_range": features.get("in_range"),
+        "lower_bound": features.get("range_lower"),
+        "upper_bound": features.get("range_upper"),
+        "edge_distance_frac": features.get("edge_distance_frac"),
+        "single_sided": features.get("single_sided"),
+        "side_bias_x": features.get("side_bias_x"),
+        "fees_usd": None if "fees_unknown" in gaps else features.get("fees_usd"),
+        "current_value_usd": (features.get("value_usd")
+                              if features.get("value_known") else None),
+        "days_open": features.get("days_open"),
+        "lower_price": pos.get("lower_price"),
+        "upper_price": pos.get("upper_price"),
+        "current_price": pos.get("current_price"),
+    }
+
+
+def _position_policy_close(record: dict, pool_name, pair_class, sym_x, sym_y) -> dict:
+    return {"position_id": record.get("position_id") or record.get("position_address"),
+            "pool": pool_name,
+            "pool_address": record.get("pool_address"),
+            "pair_class": pair_class, "pair": [sym_x, sym_y],
+            "score": 0.0, "components": {}, "verdict": "CLOSE",
+            "collect_fees": False,
+            "data_quality": {"unknown_components": [], "policy_close": True},
+            "reason": "off-universe pair: policy is stables/high-caps only",
+            "note": "off-universe pair: policy is stables/high-caps only"}
+
+
+def _score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
+                         ctx: dict = None, extra_unknown: list = None) -> dict:
+    """Shared scoring policy. `pos` is either the raw record (local path) or
+    a normalized view built from Missy's features — policy is identical."""
+    cfg = get_config()
+    profile = cfg["position_profiles"][pair_class]
+    w = profile["weights"]
+    components = {}
+    unknown_parts = []
+
+    def add(name, result):
+        pts, known = result
+        components[name] = pts
+        if not known:
+            unknown_parts.append(name)
+
+    add("range_status", score_position_range_status(pos, w["range_status"]))
+    add("fee_capture", score_position_fee_capture(pos, w["fee_capture"], pool))
+    add("staleness", score_position_staleness(pos, w["staleness"]))
+    if "depeg_exposure" in w:
+        add("depeg_exposure", score_position_depeg_exposure(
+            pos, w["depeg_exposure"], sym_x, sym_y, pool))
+    if "il_risk" in w:
+        add("il_risk", score_position_il_risk(pos, w["il_risk"], pool))
+
+    total = round(clamp(sum(components.values())), 2)
+    # NEW: apply depeg risk as a penalty multiplier (max 30% reduction).
+    # Depeg exposure of 1.0 (fully pegged) = no reduction; lower = more reduction.
+    # This is separate from the additive component model; it caps the final score.
+    try:
+        depeg_pts, depeg_known = score_position_depeg_exposure(
+            pos, 1.0, sym_x, sym_y, pool)  # pts is peg fraction 0-1
+        if depeg_known and depeg_pts is not None:
+            # Clamp peg fraction to [0,1] and compute penalty: 1.0→0% reduction, 0→30% reduction
+            peg_frac = clamp(float(depeg_pts), 0.0, 1.0)
+            total = total * (1.0 - peg_frac * 0.3)
+    except Exception:
+        pass  # if anything fails, keep total unchanged
+    thr = cfg["position_thresholds"]
+
+    # Dynamic expected-PnL override (only when inputs are complete).
+    pnl = None
+    pnl_cfg = (ctx or {}).get("position_pnl") if ctx else None
+    if pnl_cfg and pnl_cfg.get("enabled"):
+        pnl = dynamic.expected_pnl_verdict(pos, pool, cfg)
+
+    # --- Open/close separation -------------------------------------------
+    # Close requires known data for every component. Any unknown input caps
+    # the verdict at REVIEW: missing data is a data problem, not evidence.
+    if pnl and pnl.get("decisive"):
+        action = pnl["action"]
+        if unknown_parts and action in ("CLOSE", "REBALANCE"):
+            verdict = "REVIEW"
+            reason = (f"PNL suggests {action} but unknown: "
+                      f"{', '.join(unknown_parts)}")
+        else:
+            verdict = action
+            reason = (f"PNL decision: {action} (HOLD={pnl['expected_hold_usd']}, "
+                      f"CLOSE={pnl['expected_close_usd']}, "
+                      f"REBALANCE={pnl['expected_rebalance_usd']}, "
+                      f"margin={pnl['margin_usd']})")
+    elif total < thr["close"] and unknown_parts:
+        verdict = "REVIEW"
+        reason = (f"score {total} < close threshold {thr['close']} but "
+                  f"unknown: {', '.join(unknown_parts)}")
+    elif total < thr["close"]:
+        verdict = "CLOSE"
+        reason = f"score {total} < close threshold {thr['close']}"
+    elif total < thr["review"]:
+        verdict = "REVIEW"
+        reason = f"score {total} in review band [{thr['close']}, {thr['review']})"
+    else:
+        verdict = "HOLD"
+        reason = f"score {total} >= hold threshold {thr['review']}"
+    if unknown_parts and verdict != "REVIEW":
+        reason += f" (unknown: {', '.join(unknown_parts)})"
+
+    # Fee harvesting: worth the tx cost when fees clear collect_pct_of_value
+    # of position value (or the floor when value is unknown). Unknown fees
+    # never trigger a collection signal.
+    fees = _fees_usd_or_none(pos)
+    value = pos.get("current_value_usd")
+    floor = float(cfg["constants"]["collect_min_usd"])
+    if isinstance(value, (int, float)) and value > 0:
+        floor = max(floor, float(cfg["constants"]["collect_pct_of_value"]) * float(value))
+    collect = fees is not None and fees >= floor
+
+    for gap in (extra_unknown or []):
+        if gap not in unknown_parts:
+            unknown_parts.append(gap)
+
+    return {"position_id": pos.get("position_id") or pos.get("position_address"),
+            "pool": pool_name,
+            "pool_address": pos.get("pool_address"),
+            "pair_class": pair_class, "pair": [sym_x, sym_y],
+            "lower_bound": pos.get("lower_bound"),
+            "upper_bound": pos.get("upper_bound"),
+            "lower_price": pos.get("lower_price"),
+            "upper_price": pos.get("upper_price"),
+            "current_price": pos.get("current_price"),
+            "current_value_usd": pos.get("current_value_usd"),
+            "days_open": pos.get("days_open"),
+            "fees_usd": fees,
+            "score": total, "components": components, "verdict": verdict,
+            "collect_fees": collect,
+            "data_quality": {"unknown_components": unknown_parts,
+                             "policy_close": False},
+            "reason": reason,
+            "expected_pnl": pnl,
+            "note": reason}
+
+
+# --------------------------------------------------------------------------
+# Main cycle
+# --------------------------------------------------------------------------
+def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
+              max_age_seconds: float = 3900.0) -> dict:
+    cfg = get_config()
+    report = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime()),
+              "sources": {}, "pool_scores": [], "position_scores": [],
+              "verdicts": [], "failures": []}
+
+    pool_path = newest_file(pools_dir, "pool_scan")
+    pos_path = newest_file(positions_dir, "position_scan")
+    report["sources"] = {"pools": pool_path, "positions": pos_path}
+
+    # Load wallet scan if a directory was supplied. A missing wallet does not
+    # fail the cycle; it simply makes OPEN signals ineligible.
+    if wallet_scans_dir:
+        report["wallet"] = load_wallet_scan(wallet_scans_dir)
+        report["sources"]["wallet_scan"] = report["wallet"].get("source")
+    else:
+        report["wallet"] = _empty_wallet("wallet_scans_dir not provided")
+
+    pools, positions = [], []
+    if not pool_path or not is_fresh(pool_path, max_age_seconds):
+        report["failures"].append("pool data missing or stale")
+    else:
+        pools = load_json(pool_path)
+        if not isinstance(pools, list):
+            report["failures"].append("pool data malformed (expected list)")
+            pools = []
+    if not pos_path or not is_fresh(pos_path, max_age_seconds):
+        report["failures"].append("position data missing or stale")
+    else:
+        pos_data = load_json(pos_path)
+        positions = (pos_data.get("positions", []) if isinstance(pos_data, dict)
+                     else pos_data if isinstance(pos_data, list) else [])
+    if report["failures"]:
+        return report
+
+    # Dynamic calibration context: percentiles, regime weights, PnL config.
+    ctx = None
+    try:
+        ctx = dynamic.build_context(pools_dir, pool_path, pools, cfg)
+    except Exception as _exc:
+        import traceback
+        report["failures"].append(f"dynamic context failed: {_exc}")
+        report["dynamic_error"] = traceback.format_exc()
+
+    # Determine whether to trust Missy's default score or recompute locally.
+    spolicy = load_scoring_policy()
+    scoring_source = spolicy["source"]
+    report["scoring_policy"] = spolicy
+    scorer = score_pool_missy if scoring_source == "missy" else score_pool
+    # Position inputs: Missy's feature vector (policy stays Sheldon's) or
+    # local re-derivation from the raw record (kept for backtesting).
+    position_source = spolicy["position_source"]
+    report["position_scoring_policy"] = {
+        "source": position_source,
+        "features_version": spolicy["position_features_version"],
+    }
+
+    pools_by_addr = {}
+    open_pools = {}
+    # First pass: raw scores with regime-adjusted components/blending.
+    for pool in pools:
+        s = scorer(pool, ctx)
+        report["pool_scores"].append(s)
+        if pool.get("pool_address"):
+            pools_by_addr[pool["pool_address"]] = pool
+        if s["verdict"] == "OPEN_CANDIDATE":
+            open_pools[s["pool_address"]] = s["score"]
+            report["verdicts"].append({
+                "action": "OPEN_CANDIDATE", "pool": s["pool"],
+                "pool_address": s["pool_address"], "dex": s.get("dex"),
+                "pair_class": s.get("pair_class"), "score": s["score"],
+                "evidence": s["components"], "reason": s.get("reason"),
+                "_pool": s.get("_pool")})
+
+    # Adaptive thresholds derived from the scored universe.
+    if ctx is not None:
+        scores = [s["score"] for s in report["pool_scores"]
+                  if s["pair_class"] not in ("off_universe", "unknown")]
+        adaptive_thr = dynamic.adaptive_pool_thresholds(scores, cfg)
+        if adaptive_thr:
+            ctx["thresholds"] = adaptive_thr
+            report["dynamic_thresholds"] = adaptive_thr
+            # Re-tag verdicts using the adaptive thresholds.
+            for s in report["pool_scores"]:
+                if s["pair_class"] in ("off_universe", "unknown"):
+                    continue
+                s["verdict"] = pool_verdict(s["score"], adaptive_thr)
+                # Missy's discovery gates survive re-tagging: an ineligible
+                # pool never re-opens on an adaptive threshold.
+                _p = s.get("_pool") or {}
+                if s["verdict"] == "OPEN_CANDIDATE" and _p.get("eligible") is False:
+                    s["verdict"] = "IGNORE"
+                    s["reason"] = (f"adaptive: score {s['score']} >= open threshold "
+                                   f"but Missy gate rejected: "
+                                   f"{_p.get('rejected_reason') or 'eligible=false'}")
+                    continue
+                if s["verdict"] == "OPEN_CANDIDATE":
+                    s["reason"] = (f"adaptive: score {s['score']} >= open threshold "
+                                   f"{adaptive_thr['open']}")
+                    open_pools[s["pool_address"]] = s["score"]
+                elif s["verdict"] == "WATCH":
+                    s["reason"] = (f"adaptive: score {s['score']} >= watch threshold "
+                                   f"{adaptive_thr['watch']}")
+                else:
+                    s["reason"] = (f"adaptive: score {s['score']} < watch threshold "
+                                   f"{adaptive_thr['watch']}")
+                s["dynamic"]["thresholds"] = "adaptive"
+            # Rebuild verdicts list for open candidates after re-tag.
+            open_pools = {s["pool_address"]: s["score"]
+                          for s in report["pool_scores"]
+                          if s["verdict"] == "OPEN_CANDIDATE" and s.get("pool_address")}
+            report["verdicts"] = [v for v in report["verdicts"]
+                                   if v.get("action") != "OPEN_CANDIDATE"]
+            for s in report["pool_scores"]:
+                if s["verdict"] == "OPEN_CANDIDATE":
+                    report["verdicts"].append({
+                        "action": "OPEN_CANDIDATE",
+                        "pool": s["pool"],
+                        "pool_address": s["pool_address"],
+                        "dex": s.get("dex"),
+                        "pair_class": s.get("pair_class"),
+                        "score": s["score"],
+                        "evidence": s.get("components"),
+                        "reason": s.get("reason"),
+                        "_pool": s.get("_pool"),
+                    })
+
+    for pos in positions:
+        if position_source == "missy":
+            s = score_position_missy(pos, pools_by_addr, ctx)
+        else:
+            s = score_position(pos, pools_by_addr, ctx)
+        report["position_scores"].append(s)
+        verdict = s["verdict"]
+        if verdict in {"CLOSE", "REVIEW"} and s["pool_address"] in open_pools:
+            verdict = "REBALANCE"  # pool is still good: close and re-range
+        if verdict == "HOLD" and s["collect_fees"]:
+            verdict = "COLLECT_FEES"
+        report["verdicts"].append({
+            "action": verdict, "position": s["position_id"], "pool": s["pool"],
+            "pool_address": s.get("pool_address"), "dex": pos.get("dex"),
+            "pair_class": s.get("pair_class"),
+            "lower_bound": s.get("lower_bound"), "upper_bound": s.get("upper_bound"),
+            "fees_usd": s.get("fees_usd"), "score": s["score"],
+            "evidence": s["components"],
+            "reason": s.get("reason"),
+            "note": s.get("note")})
+
+    report["dynamic"] = ctx
+    return report
+
+
+def render_summary(report: dict) -> str:
+    lines = [f"Sheldon LP evaluation — {report['generated_at']}"]
+    if report["failures"]:
+        lines += [f"FAILURES: {'; '.join(report['failures'])}"]
+        return "\n".join(lines)
+    top = sorted(report["pool_scores"], key=lambda s: s["score"], reverse=True)[:5]
+    lines.append("Top pool LP opportunities:")
+    for s in top:
+        lines.append(f"  {str(s['pool']):<22} [{s.get('pair_class') or '-':<17}] "
+                     f"score={s['score']:>6.1f}  {s['verdict']}")
+    if report["position_scores"]:
+        lines.append("Open LP positions:")
+        for s in report["position_scores"]:
+            extra = " (fees ready to collect)" if s["collect_fees"] else ""
+            lines.append(f"  {str(s['pool']):<22} [{s.get('pair_class') or '-':<17}] "
+                         f"score={s['score']:>6.1f}  {s['verdict']}{extra}")
+            if s.get("reason"):
+                lines.append(f"    reason: {s['reason']}")
+    else:
+        lines.append("Open LP positions: none")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Sheldon LP scoring engine")
+    ap.add_argument("--pools-dir", default="/data/missy-data/pool_screens")
+    ap.add_argument("--positions-dir", default="/data/missy-data/position_scans")
+    ap.add_argument("--wallet-scans-dir", default="/data/missy-data/wallet_screens")
+    ap.add_argument("--json", action="store_true", help="full JSON report")
+    args = ap.parse_args()
+    try:
+        report = run_cycle(args.pools_dir, args.positions_dir, args.wallet_scans_dir)
+    except ConfigError as exc:
+        print(f"CONFIG ERROR: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        json.dump(report, sys.stdout, indent=2)
+        print()
+    else:
+        print(render_summary(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

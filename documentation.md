@@ -137,9 +137,12 @@ Each component is scored 0-its-weight, then summed to 0-100 (clamped).
 #### `score_pool_fee_yield(pool, max_pts, apr_cap_pct)`
 
 ```
-fee_yield = max_pts * clamp(realized_fee_apr / apr_cap, 0, 1)
+fee_yield = max_pts * ratio**2  # sqrt curve
 ```
+where `ratio = clamp(realized_fee_apr / apr_cap_pct, 0.0, 1.0)`
 
+- **Updated: square-root curve** rewards moving from 0→10% APR more than 50→60% APR,
+  dampening unsustainable ultra-high APR effects.
 - `realized_fee_apr` only; fee/TVL is NOT added (it duplicates turnover)
 - `apr_cap_pct`: 100 for stable_stable, 300 otherwise
 
@@ -160,16 +163,13 @@ else: max_pts * log(tvl / 50k) / log(5M / 50k)
 
 #### `score_pool_volatility_fit(pool, max_pts, peak_pct)`
 
-Triangular curve peaking at the class peak (0.5% / 8% / 10%):
+**Volatility fitness score** (proportional clamp, not triangular):
 
-- vol ≤ 0 → 0 (and a reason note: "volatility unknown")
-- vol ≥ 3×peak → 0
-- vol ≤ peak: `max_pts * vol/peak`; above: `max_pts * (3*peak - vol)/(2*peak)`
-
-**NEW: liquidity_effectiveness concept** — incorporates the 15% target volatility
-from the experimental fee-capture model. Volatility near 15% receives a bonus,
-while extreme volatility is further penalized, since concentrated volatility can
-reduce capital efficiency even within acceptable bounds.
+- **Updated: instead of triangular curve peaking at 'peak', this uses a proportional clamp.**
+  Higher vol → more fees. Vol at or above peak_pct gets full points; below peak gets proportional; zero vol gets 0.**
+- vol ≤ 0 → 0
+- vol ≥ peak_pct → full max_pts
+- 0 < vol < peak_pct: `max_pts * (vol / peak_pct)` (proportional)
 
 #### `score_pool_new_fc(pool, ctx)` (experimental fee-capture model)
 
@@ -215,6 +215,13 @@ turnover (< 20×TVL/day). The `cross_model` field notes agreement or disagreemen
 between the missy-default and new_fc verdicts. This does not replace the
 position health score — Sheldon's policy (weights, thresholds, verdicts)
 remains unchanged — but it aids diagnostics and rotation timing decisions.
+
+**Updated position scoring formulas** (newwest):
+- `score_position_range_status`: centering reward `max_pts * (1.0 - edge_frac)` — 1.0 at center, 0.0 at edge
+- `score_position_fee_capture`: APR-normalized efficiency blend `blended = 0.7 * efficiency_norm + 0.3 * ratio`
+- `score_position_il_risk`: net yield coverage `clamp(1.0 + (fees - IL) / value, 0, 2)` — positive net yield scores above baseline
+- `score_position_staleness`: replaced by range efficiency (proportion of in-range days)
+- `score_position_depeg_exposure`: applied as multiplicative penalty cap (max 30% reduction) to final score
 
 #### `score_position_range_status(pos, max_pts)`
 

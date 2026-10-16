@@ -97,11 +97,11 @@ The system scores both **pools** (opportunity: "should we open a position here?"
 - `score_pool_depth()`: `max_pts * log(tvl / depth_min) / log(depth_max / depth_min)`
 - `score_pool_volatility_fit()`: Triangular curve: `vol/peak` if vol≤peak, else `(3*peak - vol)/(2*peak)`
 - `score_pool_depeg_safety()`: `max_pts * min(sides)` where each side = `clamp(1 - |price - 1| / zero_dist, 0, 1)`
-- `score_position_range_status()`: In-range with edge-distance fade: `max_pts * (0.6 + 0.4 * edge_frac)`
-- `score_position_fee_capture()`: `fees_usd / expected_fees_usd`; expected estimated from pool APR × value × days
-- `score_position_il_risk()`: `max_pts * clamp(1 - il / il_zero_pct, 0, 1)`
-- `score_position_depeg_exposure()`: Min of peg fractions; single-sided penalized
-- `score_position_staleness()`: Grace 30d, erodes to 0 at 120d: `max_pts * clamp(1 - (days - grace)/(zero - grace), 0, 1)`
+- `score_position_range_status()`: In-range with centering reward: `max_pts * (1.0 - edge_frac)` where edge_frac=0 at center, 1 at boundary
+- `score_position_fee_capture()`: APR-normalized efficiency: `blended = 0.7 * clamp(efficiency, 0, 2) + 0.3 * (fees/expected)`; efficiency = daily fee yield / (value * APR/365)
+- `score_position_il_risk()`: Net yield coverage: `max_pts * clamp(1 + (fees - IL) / value, 0, 2)`; positive net yield scores above baseline
+- `score_position_depeg_exposure()`: Penalty multiplier: final score × (1 - peg_frac × 0.3), max 30% reduction
+- `score_position_staleness()`: Range efficiency: `max_pts * (in_range_days / total_days)`; rewards positions that have consistently stayed in-range
 
 **Blending with Percentiles** (`_maybe_blend()`):
 ```
@@ -307,11 +307,11 @@ where `center` is `active_bin_id` for Meteora, tick for Raydium/Orca.
           - If explicit bounds present and current within [lower, upper]:
             - `edge_dist = min(current - lower, upper - current) / (span/2)`
             - `edge_frac = clamp(edge_dist / 0.5, 0, 1)` (edge_dist-0→0, center→1)
-            - Return `max_pts * (0.6 + 0.4 * edge_frac), True`
+            - Return `max_pts * (1.0 - edge_frac), True`
           - If bounds missing but `in_range` present:
             - If `in_range=False` and bounds missing → `max_pts * unknown_credit (0.5), False` (partial credit, flags unknown)
             - If `in_range=False` → `0.0, True` (out of range)
-            - If `edge` (float) present → `max_pts * (0.6 + 0.4 * clamp(edge, 0, 1)), True`
+            - If `edge_distance_frac` present → `max_pts * (1.0 - clamp(edge, 0, 1)), True`
             - Else → `max_pts, True` (full credit, in range)
           - If no bounds and no `in_range` → `max_pts * unknown_credit, False`
         - `fee_capture`: `score_position_fee_capture(pos, w["fee_capture"], pool)`
@@ -321,7 +321,10 @@ where `center` is `active_bin_id` for Meteora, tick for Raydium/Orca.
             - Uses Missy's `expected_fees_usd` if present > 0
             - Else: `value * apr/100 * min(days, fee_expect_max_days=30) / 365`
             - If expected ≤ 0 → half credit, unknown
-          - Ratio = fees / expected; `max_pts * clamp(ratio, 0, 1)`, known=True if both known
+          - APR normalization: daily fee yield / (value * APR/365) blended with raw capture ratio
+          - `blended = 0.7 * clamp(efficiency, 0, 2) + 0.3 * (fees/expected)`
+          - `fee_capture_pts = max_pts * clamp(blended, 0, 1)`
+          - Efficiency cross-normalizes for pool fee rates; 70% efficiency, 30% raw ratio
         - `staleness`: `score_position_staleness(pos, w["staleness"])`
           - If `days_open` is None → `max_pts * unknown_credit, False` (unverifiable age)
           - If days ≤ grace (30) → `max_pts, True`
@@ -331,10 +334,14 @@ where `center` is `active_bin_id` for Meteora, tick for Raydium/Orca.
           - Single-sided detection: if `single_sided=True` → `max_pts * held_peg_frac, known`
           - Two-sided → `max_pts * min(fx, fy), known`
         - `il_risk`: `score_position_il_risk(pos, w["il_risk"], pool)` (only for bluechip profiles)
-          - `estimate_il_pct(pos, pool, days)`: Uses Missy's `il_estimate_pct` if present
-          - Else: `conc * (vol/100)^2 / 8 * 100 * days` where `conc = clamp(full_width_ticks / range_width, 1, 4)`
-          - If il unknown → `max_pts * unknown_credit, False`
-          - Else: `max_pts * clamp(1 - il / il_zero_pct=10, 0, 1), True`
+          - Net yield coverage: whether fees cover impermanent loss
+          - Positive net yield (fees > IL) scores above baseline
+          - Break-even (fees ≈ IL) scores at baseline
+          - Negative net yield (IL > fees) scores below baseline
+          - `net_yield_pct = (fees - IL) / value`
+          - `coverage = clamp(1.0 + net_yield_pct, 0, 2)`
+          - `il_risk_pts = max_pts * coverage`
+          - Replaces pure IL penalty with profitability signal
      d. **Component aggregation**: `components[comp] = pts`; `unknown_parts.append(name)` if not known
      e. **Total score**: `round(clamp(sum(components.values())), 2)`
      f. **Verdict determination** (open/close separation critical):
@@ -504,10 +511,11 @@ Where each component is scored 0-its-weight, then the total is clamped to 0-100.
 
 **1. fee_yield** (Realized Fee APR)
 ```
-fee_yield_pts = max_pts * clamp(realized_fee_apr / apr_cap_pct, 0, 1)
-```
+**1. fee_yield** (Realized Fee APR)
+- **Updated: sqrt curve** — `fee_yield_pts = max_pts * ratio**2` where `ratio = clamp(realized_fee_apr / apr_cap_pct, 0.0, 1.0)`  
+- Rewards moving from 0→10% APR more than 50→60% APR, dampening unsustainable ultra-high APR effects
 - `realized_fee_apr` from pool scan
-- `apr_cap_pct` from profile (100 for stable_stable, 300 for stable_bluechip/bluechip_bluechip)
+- `apr_cap_pct` from profile (100 for stable_stable, 300 for stable_bluechip/bluechip_bluechip)- `apr_cap_pct` from profile (100 for stable_stable, 300 for stable_bluechip/bluechip_bluechip)
 
 **2. turnover** (Window Volume / TVL)
 ```
@@ -519,10 +527,10 @@ turnover_pts = max_pts * clamp(turnover_raw / turnover_max, 0, 1)
 
 **3. depth** (TVL Log Scale)
 ```
-depth_min = 50000, depth_max = 5000000
-if tvl < depth_min → 0
-frac = log(tvl / depth_min) / log(depth_max / depth_min)
-depth_pts = max_pts * clamp(frac, 0, 1)
+**3. depth** (TVL adequacy gate, binary)
+- If TVL < depth_min_usd (50k) → **0 points** (slippage risk)
+- If TVL ≥ depth_min_usd → **full max_pts** (depth requirement met)
+- Further depth beyond minimum does **not** add reward — this is a gate, not a rewarddepth_pts = max_pts * clamp(frac, 0, 1)
 ```
 - Log scale between $50k and $5M TVL
 - Tvls below $50k score 0; above $5M score max_pts
@@ -670,27 +678,30 @@ il_pct = conc * (vol_daily / 100)^2 / 8 * 100 * days_open
 - Quadratic in volatility: doubling vol quadruples IL
 - Linear in days: longer exposure → more IL
 
-#### Range Status Edge-Distance Formula
+#### Range Status Centering Formula
 ```
 span = upper - lower
 edge_dist = min(current - lower, upper - current) / (span / 2)
-edge_frac = clamp(edge_dist / 0.5, 0, 1)  # 0 at boundary, 1 at center
-range_status_pts = max_pts * (0.6 + 0.4 * edge_frac)
+edge_frac = clamp(edge_dist / 0.5, 0, 1)  # 0 at center, 1 at boundary
+range_status_pts = max_pts * (1.0 - edge_frac)
 ```
-- Positions at bin edges get 60% of max credit (the 0.6 base)
-- Positions at center get 100% (0.6 + 0.4 = 1.0)
-- Linear interpolation between
+- Center of range: 1.0 × max_pts (full credit)
+- Edge of range: 0.0 × max_pts (no credit)
+- Linear decay from center to boundary
+- Out-of-range: 0.0 (verifiably current outside [lower, upper])
+- Old formula `0.6 + 0.4 * edge_frac` rewarded being close to the edge; the new centering reward favors being safely in the middle of the range.
 
-#### Staleness Erosion Formula
+#### Range Efficiency (Replaces Staleness)
 ```
-if days <= grace (30): return max_pts
-else:
-  frac = 1 - (days - grace) / (zero - grace)  # zero = 120
-  return max_pts * clamp(frac, 0, 1)
+in_range_days = position record's explicit in-range-day count
+total_days = days_open from position entry
+efficiency_pct = in_range_days / total_days  # clamped to [0, 1]
+range_efficiency_pts = max_pts * efficiency_pct
 ```
-- Full credit within 30-day grace period
-- Erodes linearly to 0 between 30 and 120 days
-- Beyond 120 days → 0 (completely stale)
+- Positions that have spent 90%+ of their lifetime in-range score near-full credit
+- Positions that have frequently exited their range score proportionally less
+- Brand-new positions (total_days ≈ 0) conservatively get full credit
+- Old staleness model penalized long-holding positions; the new range efficiency rewards positions that have **proven** their range selection by staying in-range.
 
 #### Pool Score Quantile Calculation
 From `dynamic.py` `_quantile()`:

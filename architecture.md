@@ -1,130 +1,17 @@
-# Architecture
-
-## Overview
-
-Sheldon is a deterministic LP scoring engine that evaluates DeFi liquidity pool
-positions on **Meteora DLMM**, **Raydium CLMM**, and **Orca Whirlpool**. It
-consists of these modules:
-
-1. **`lp_scoring.py`** — Core scoring engine (config-driven, data-quality aware)
-2. **`dynamic/`** — Modular dynamic calibration layer:
-   - `calibration.py` — percentiles, regime detection, adaptive thresholds, expected-PnL verdicts
-   - `helpers.py` — percentile ranking and norms building
-   - `regime.py` — market regime classification and weight adjustment
-   - `thresholds.py` — adaptive pool OPEN/WATCH cut-offs from quantiles
-3. **`run_cycle/`** — Modular cycle runner:
-   - `gates.py` — trading window and open-candidate filtering
-   - `signals.py` — George-signal building and writing
-   - `report.py` — human-readable logs and summaries
-   - `__init__.py` — backward-compatible wrappers matching original `run_cycle.py` API
-4. **`strategy/`** — Position sizing and volatility-adaptive ranges, loaded from
-   `sheldon_policy.json` + George's `execution_limits.json`
-5. **`capital.py`** — Wallet scan loader (`summarize_wallet`: idle USDC, dust, deployable)
-6. **`readiness/`** — Modular capital readiness:
-   - `__init__.py` — package re-exports
-   - `wallet.py` — raw wallet scan loading
-   - `funding.py` — funding plan builder
-   - `prep_swap_gates.py` — swap gating (rescan wait + hourly loop guards)
-   - `prep_swap.py` — build George-schema swap signals
-7. **`range_state.py`** — Side-aware out-of-range close rail
-   (`state/out_of_range.json`, `ALLOWED_OUT_OF_RANGE_RUNS=2`; right = immediate,
-   left = two verified runs)
-8. **`idle_sweep.py`** — Idle-capital sweep into the best tracked position
-   (`add_liquidity`, `state/add_state.json`)
-9. **`tuner.py`** — Out-of-sample weight search over historical PnL (writes
-   `profiles.tuned.json`, `--apply` with backup)
-10. **`profiles.json`** — Externalized scoring configuration (weights,
-    thresholds, constants, dynamic knobs). Per-pair-class weights include
-    `new_fc_weights` for experimental fee-capture model. Missing file → built-in
-    defaults; invalid file → fatal error (fail-closed).
-11. **`sheldon_policy.json`** — Strategy policy (pool eligibility, sizing,
-    windows, slippage, add_policy)
-12. **`backtest.py`** — Historical replay of pool/position verdicts over the
-    Missy scan archive with synthetic PnL + robustness stats
-13. **`models.py`** — Legacy, currently unused (nothing imports them; scoring
-    returns plain dicts)
-14. **`lp_scoring.py`** — Main entry point, also re-exports key names for backward compatibility
-
-Tests: `python3 -m unittest discover` or individually:
-  `test_lp_scoring.py`, `test_dynamic.py`, `test_run_cycle.py`,
-  `test_idle_sweep.py`, `test_range_state.py` (stdlib unittest).
-
-## Data Flow
-
-1. **Input**: Newest `pool_scan-*.json`, `position_scan-*.json`, and
-   `wallet_screen-*.json` files from configured directories
-2. **Validation**: Freshness check (max-age, default 3900 s), malformed data
-   handling, config validation at load time
-3. **Dynamic calibration**: `dynamic.py` builds a context from prior scans
-   (rolling percentiles, regime, adaptive thresholds) and passes it into scoring
-4. **Scoring**: Each pool gets a 0-100 score across 4-5 weighted components;
-   each position gets a 0-100 score plus a `data_quality` record listing
-   components scored on missing/unusable inputs. `score_pool` embeds the
-   original `_pool` dict; OPEN_CANDIDATE verdicts carry it for signal building
-5. **Verdicts**: Scores map to verdicts. **Open/close separation**: a position
-   verdict of CLOSE requires all components to be scored on known data — any
-   unknown component caps the verdict at REVIEW. Policy CLOSE
-   (off-universe/unknown pair) is exempt and always CLOSE. With enough data,
-   expected-PnL can override the score-based verdict.
-6. **Out-of-range close rail**: `range_state.py` classifies each live position
-   as full-right (price/bin above the range), full-left (below), inside, or
-   unknown, and counts consecutive verified runs per pool
-   (`state/out_of_range.json`). Full-right closes immediately (promoting HOLD
-   to CLOSE); full-left closes on run 2; inside/unknown resets and never
-   closes. Switching sides restarts the counter.
-7. **Open filtering + strategies**: `_filter_open_candidates` drops dedup/
-   duplicate/center-unknown/out-of-window/policy-gated/bin-step-violating
-   candidates; `strategy.build_strategies` ranks survivors by score (top
-   `max_opens_per_cycle=3`) with volatility-adaptive ranges and 75%-of-
-   deployable sizing.
-8. **Funding + readiness**: `readiness.plan_funding` diffs strategy token needs
-   against the raw wallet scan; `gate_prep_swaps` blocks rescan-races and
-   hourly loops. Unfunded strategies yield prep `swap` signals, not opens.
-9. **Signal building**: `write_signals` emits opens first, then dust
-   `swap_to_usdc`, prep swaps, and closes/claims; `idle_sweep.plan_sweep`
-   sweeps leftover sub-floor idle into the best tracked position.
-10. **Output**: JSON report, human summary, signal files, daily markdown log,
-   and a `dynamic` block showing the active regime and thresholds
-
-## Scoring Components
-
-### Pool LP Opportunity Score (weights per pair class, sum to 100)
-
-| Component | stable_stable | stable_bluechip | bluechip_bluechip | Description |
-|---|---|---|---|---|
-| `fee_yield` | 35 | 30 | 30 | Realized fee APR vs class APR cap |
-| `turnover` | 15 | 20 | 20 | Window volume / TVL (5x window = max) |
-| `depth` | 15 | 15 | 15 | TVL log-scale $50k-$5M |
-| `volatility_fit` | 10 | 20 | 35 | Triangular curve peaking at class vol peak |
-| `depeg_safety` | 25 | 15 | — | Stable-side distance from $1 |
-| `new_fc_score` | — | — | — | **Experimental**: fee-capture model score (0-100) with components: fee_yield_score (35%), absolute_fee_score (25%), liquidity_effectiveness (20%), turnover_penalty_score (10%), lp_share_adjustment (10%). Complements missy-default (APR/TVL/volatility) model. |
-
-### Position Health Score (sum to 100)
-
-| Component | stable_stable | stable_bluechip | bluechip_bluechip | Description |
-|---|---|---|---|---|
-| `range_status` | 35 | 30 | 30 | In-range with edge-distance fade |
-| `fee_capture` | 25 | 20 | 20 | fees_usd / expected_fees_usd (estimated if missing) |
-| `depeg_exposure` | 25 | — | — | Stable peg health + single-sided penalty |
-| `il_risk` | — | 30 | 30 | IL estimate (volatility × concentration) or reported |
-| `staleness` | 15 | 20 | 20 | Grace 30d, erodes to 0 at 120d |
-
-Each position result carries `data_quality.unknown_components` — the list of
-components whose inputs were missing or unusable (e.g. Orca fee sentinel
-`u64::MAX`, zero pool volatility).
-
-## Dynamic Layers
-
-| Layer | Module | Behaviour |
-|---|---|---|
-| 1. Rolling percentiles | `dynamic.py` | `fee_yield` and `turnover` are scored as a percentile of the same pair class over the trailing window, blended with the absolute score (`blend_alpha`) |
-| 2. Regime detection | `dynamic.py` | Classifies market as `neutral`/`low_vol`/`high_vol`/`fee_boom`/`cracked_peg` and shifts component weights multiplicatively |
-| 3. Adaptive thresholds | `dynamic.py` | `OPEN`/`WATCH` cut-offs are quantiles of the scored universe (floor/ceil clamps keep them sane) |
-| 4. Expected-PnL verdicts | `dynamic.py` | Compares HOLD vs CLOSE vs REBALANCE expected value over a short horizon; only overrides when inputs are complete and the margin is decisive |
-| 5. Weight tuner | `tuner.py` | Random search over weight perturbations, validated on the last 20% of scan history, writes `profiles.tuned.json` |
-| 6. Cross-model scoring | `scoring/pool/score.py`, `scoring/position/score.py`, `run_cycle/gates.py` | new_fc_score (fee-capture model) provides complementary lens alongside missy-default; dual-model gate in `_filter_open_candidates` requires cross-model agreement or weighted combination |
-
 ## Verdict Mapping
+
+### RFNE Model Key Shifts (newwest update)
+
+| Old Assumption | New Assumption |
+|---|---|
+|---|---|
+| Staleness = age penalty (older = worse) | Staleness → Range efficiency (how long stayed in-range) |
+| IL = pure penalty (always subtracts from score) | IL → Net yield coverage (fees - IL; profitable positions score above baseline) |
+| Range edge proximity = safety (closer to edge = lower score but still rewarded) | Range centering = safety (center is safest; approaching edge reduces score) |
+| Fee capture = `fees / expected` raw ratio | Fee efficiency = ratio normalized by pool APR (high-fee pools rewarded) |
+| Depeg exposure = additive score component | Depeg risk = multiplicative penalty cap (max 30% score reduction) |
+
+
 
 - **Pool** (static defaults): ≥ 70 → OPEN_CANDIDATE, ≥ 55 → WATCH, else IGNORE
   - With adaptive thresholds, cut-offs come from the quantiles of the scored universe

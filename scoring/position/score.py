@@ -14,9 +14,9 @@ U64_MAX = (1 << 64) - 1
 STABLECOINS = {"USDC", "USDT", "USDG"}
 HIGH_CAPS = {
     "SOL", "WSOL",
-    "CBT", "WBTC", "CBBTC",
+    "BTC", "WBTC", "CBBTC",
     "ETH", "WETH",
-    "XRP", "cbRXP",
+    "XRP", "cbXRP",
     "ZEC",
     "TAO",
     "XMR",
@@ -130,9 +130,10 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
     is unknown data, not out-of-range evidence: null bounds must never
     score 0 and must never read as verifiably out-of-range.
 
-    When the record carries Missy's edge_distance_frac (0 at edge, 1 at
-    center) and no price bounds, that feature drives the same curve; local
-    records without it keep the flat full-credit in-range behavior.
+    When the record carries Missy's edge_distance_frac (0 at center, 1 at
+    boundary) and no price bounds, that feature drives a centering curve:
+    center = full credit, edge = zero. Local records without it keep the
+    flat full-credit in-range behavior.
     """
     unknown_credit = float(get_config()["constants"]["unknown_credit"])
     lower, upper, current = _pos_price_bounds(pos)
@@ -141,8 +142,10 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
             return 0.0, True
         span = upper - lower
         edge_dist = min(current - lower, upper - current) / (span / 2.0)
+        # edge_frac: 0 at center, 1 at boundary. New formula rewards being
+        # centered: 1 - edge_frac gives 1.0 at center, 0.0 at edge.
         edge_frac = clamp((edge_dist - 0.0) / 0.5, 0.0, 1.0)
-        return round(max_pts * (0.6 + 0.4 * edge_frac), 2), True
+        return round(max_pts * (1.0 - edge_frac), 2), True
     edge = pos.get("edge_distance_frac")
     if "in_range" in pos and pos["in_range"] is not None:
         # A fallback record with null tick bounds reports in_range=false
@@ -155,7 +158,8 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
             return 0.0, True
         if isinstance(edge, (int, float)):
             edge_frac = clamp(float(edge), 0.0, 1.0)
-            return round(max_pts * (0.6 + 0.4 * edge_frac), 2), True
+            # New: centering reward — 1.0 at center, 0.0 at edge
+            return round(max_pts * (1.0 - edge_frac), 2), True
         return round(max_pts, 2), True
     return round(max_pts * unknown_credit, 2), False
 
@@ -175,15 +179,36 @@ def score_position_fee_capture(pos: dict, max_pts: float, pool: dict) -> tuple:
 
 
 def score_position_il_risk(pos: dict, max_pts: float, pool: dict) -> tuple:
-    """IL exposure for bluechip pairs, estimated from volatility when
-    Missy does not provide an estimate."""
+    """Net yield coverage: whether fees cover impermanent loss.
+
+    Positive net yield (fees > IL) scores above baseline.
+    Break-even (fees ≈ IL) scores at baseline.
+    Negative net yield (IL > fees) scores below baseline.
+
+    This replaces the old IL‑as‑pure‑penalty model with a profitability
+    signal: a position that earns more in fees than it loses to IL is
+    objectively healthy, regardless of IL magnitude.
+    """
     unknown_credit = float(get_config()["constants"]["unknown_credit"])
-    zero_pct = float(get_config()["constants"]["il_zero_pct"])
     days = pos.get("days_open")
     il, _source = estimate_il_pct(pos, pool, days)
     if il is None:
         return round(max_pts * unknown_credit, 2), False
-    return round(max_pts * clamp(1.0 - float(il) / zero_pct), 2), True
+
+    fees = _fees_usd_or_none(pos)
+    value = pos.get("current_value_usd")
+
+    # Compute net yield percentage: (fees - IL) / value
+    # If fees is unknown, treat IL as full penalty (net yield = -il%)
+    if fees is None or value is None or float(value) <= 0:
+        # Can't compute net yield; return unknown credit
+        return round(max_pts * unknown_credit, 2), False
+
+    net_yield_pct = (float(fees) - float(il)) / float(value)
+    # Map to score: 1.0 = break-even, >1 = profitable, <1 = losing
+    # clamp to [0, 2] so large negatives don't zero-out the whole score
+    coverage = clamp(1.0 + net_yield_pct, 0.0, 2.0)
+    return round(max_pts * coverage, 2), True
 
 
 def _peg_frac(sym, pool_key, pool):
@@ -257,21 +282,54 @@ def score_position_depeg_exposure(pos: dict, max_pts: float, sym_x, sym_y,
 
 
 def score_position_staleness(pos: dict, max_pts: float) -> tuple:
-    """Confidence that entry assumptions still hold. Healthy long-lived
-    positions are NOT punished: grace period of stale_grace_days, then a
-    gentle erosion to zero at stale_zero_days."""
-    c = get_config()["constants"]
-    unknown_credit = float(c["unknown_credit"])
-    grace = float(c["stale_grace_days"])
-    zero = float(c["stale_zero_days"])
-    days = pos.get("days_open")
-    if days is None:
-        return round(max_pts * unknown_credit, 2), False  # unverifiable age
-    days = float(days)
-    if days <= grace:
+    """Range efficiency: proportion of time the position has spent in-range
+    over its lifetime. Positions that have consistently stayed within bounds
+    reward confidence in range selection; those that frequently exit are
+    viewed as less robust.
+
+    This replaces the old staleness-eager-penalty model with a range
+    efficiency signal: age alone does not hurt a position that has proven
+    its range selection by staying in-range.
+    """
+    unknown_credit = float(get_config()["constants"]["unknown_credit"])
+    in_range_days = pos.get("in_range_days")
+    total_days = pos.get("days_open")
+
+    if total_days is None or float(total_days) <= 0:
+        # No data yet: conservatively assume full efficiency
         return round(max_pts, 2), True
-    frac = 1.0 - (days - grace) / (zero - grace)
-    return round(max_pts * clamp(frac, 0.0, 1.0), 2), True
+
+    total_days = float(total_days)
+    in_range = False is None and pos.get("in_range") is not None
+
+    # Determine in-range days:
+    # If the record explicitly tracks in_range_days, use it.
+    # Otherwise, if in_range is known True and days_open is available,
+    # assume all days were in-range (conservative).
+    # If in_range is known False, zero in-range days.
+    # If in_range is unknown, assume partial efficiency.
+    if in_range_days is not None:
+        try:
+            in_range_days = float(in_range_days)
+            if in_range_days < 0:
+                in_range_days = 0.0
+        except (TypeError, ValueError):
+            in_range_days = None
+    else:
+        # Infer from in_range flag
+        in_range_flag = pos.get("in_range")
+        if in_range_flag is True:
+            in_range_days = total_days  # assume all days in range
+        elif in_range_flag is False:
+            in_range_days = 0.0
+        else:
+            # Unknown: assume half efficiency
+            in_range_days = total_days * 0.5
+
+    efficiency_pct = in_range_days / total_days
+    # Clamp to [0, 1] and score
+    efficiency_pct = clamp(efficiency_pct, 0.0, 1.0)
+    return round(max_pts * efficiency_pct, 2), True
 
 
 def score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
@@ -300,6 +358,18 @@ def score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
         add("il_risk", score_position_il_risk(pos, w["il_risk"], pool))
 
     total = round(clamp(sum(components.values())), 2)
+    cfg = get_config()
+    # NEW: apply depeg risk as a penalty multiplier (max 30% reduction).
+    # Depeg exposure of 1.0 (fully pegged) = no reduction; lower = more reduction.
+    # This is separate from the additive component model; it caps the final score.
+    try:
+        depeg_pts, depeg_known = score_position_depeg_exposure(
+            pos, 1.0, sym_x, sym_y, pool)  # pts is peg fraction 0-1
+        if depeg_known and depeg_pts is not None:
+            peg_frac = clamp(float(depeg_pts), 0.0, 1.0)
+            total = total * (1.0 - peg_frac * 0.3)
+    except Exception:
+        pass  # if anything fails, keep total unchanged
     thr = cfg["position_thresholds"]
 
     # Dynamic expected-PnL override (only when inputs are complete).
