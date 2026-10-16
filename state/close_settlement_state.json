@@ -512,11 +512,15 @@
   },
   "sheldon-1792144142-1": {
     "action": "close",
+    "capital_evidence": "wallet scan newer than close confirmation",
+    "chain_verified_at": 1792147729.392885,
     "confirmed_at": 1792144156.0,
     "emit_time": 1792144142.1424,
+    "funds_verified_at": 1792147729.392885,
     "journal_decision": "executed",
     "pool_address": "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM",
     "position_id": "8YmDiLwQA5Mjggm5VmBcpt5hiirdjDYmDzR1E1FntPNi",
-    "status": "CLOSE_EXECUTED"
+    "position_scan_verified_at": 1792147729.392885,
+    "status": "FUNDS_VERIFIED"
   }
 }
