@@ -20,6 +20,7 @@ from capital import RESERVED_MINTS, SOL_MINT, USDC_MINT
 # ---------------------------------------------------------------------------
 SOL_RESERVE_LAMPORTS = 20_000_000  # 0.02 SOL
 USDC_DECIMALS = 6
+SOL_DECIMALS = 9
 BUY_BUFFER_PCT = 2.0
 MIN_PREP_SWAP_USD = 1.0
 SELL_SURPLUS_MIN_USD = 2.0
@@ -144,20 +145,76 @@ def plan_funding(
             req = target["req"]
 
             # USDC kept aside for this target's Y side if Y is USDC.
-            budget = remaining.get(USDC_MINT, 0)
+            usdc_budget = remaining.get(USDC_MINT, 0)
             if req["y_mint"] == USDC_MINT:
-                budget -= req["y_raw"]
-
+                usdc_budget -= req["y_raw"]
+            # Excess native SOL is also a valid funding source. It is already
+            # net of the calibrated rent/fee reserve. The target pool's own SOL
+            # deposit requirement is protected first: spending SOL that the open
+            # needs would starve the very candidate being funded.
+            sol_budget = remaining.get(SOL_MINT, 0)
+            sol_price = float((assets.get(SOL_MINT) or {}).get("price_usd") or 0.0)
+            sol_deposit_need = 0
             for side in ("x", "y"):
+                if req[f"{side}_mint"] == SOL_MINT:
+                    sol_deposit_need += req[f"{side}_raw"]
+            if sol_deposit_need:
+                sol_budget = max(0, sol_budget - sol_deposit_need)
+                notes.append(
+                    f"pool {target['pool_address']}: SOL deposit need "
+                    f"{sol_deposit_need / 10**SOL_DECIMALS:.6f} protected; "
+                    f"only excess SOL is a funding source"
+                )
+            # The target's USDC side is committed capital: a SOL-sourced prep
+            # swap emits no USDC outflow, so the signal carries this raw amount
+            # for the idle sweep's committed-capital math.
+            committed_usdc_raw = (
+                req["y_raw"] if req["y_mint"] == USDC_MINT
+                else (req["x_raw"] if req["x_mint"] == USDC_MINT else 0)
+            )
+
+            for side in ("x", "y"): 
                 mint = req[f"{side}_mint"]
                 need = req[f"{side}_raw"]
                 have = remaining.get(mint, 0)
                 if mint == USDC_MINT:
-                    if have < need:
+                    # Sourcing USDC itself: SOL is the only fallback.
+                    delta = need - have
+                    if delta <= 0:
+                        continue
+                    if sol_budget <= 0 or sol_price <= 0:
                         notes.append(
                             f"pool {target['pool_address']}: insufficient USDC "
-                            f"({have / 10**USDC_DECIMALS:.2f} < {need / 10**USDC_DECIMALS:.2f}); no prep possible"
+                            f"({have / 10**USDC_DECIMALS:.2f} < {need / 10**USDC_DECIMALS:.2f}) "
+                            "and no excess SOL to source it; no prep possible"
                         )
+                        continue
+                    cost_usd = (delta / 10**USDC_DECIMALS) * (1.0 + BUY_BUFFER_PCT / 100.0)
+                    if cost_usd < MIN_PREP_SWAP_USD:
+                        continue
+                    cost_lamports = int(math.ceil(cost_usd / sol_price * 10**SOL_DECIMALS))
+                    if cost_lamports > sol_budget:
+                        notes.append(
+                            f"pool {target['pool_address']}: sourcing "
+                            f"{delta / 10**USDC_DECIMALS:.2f} USDC needs "
+                            f"{cost_lamports / 10**SOL_DECIMALS:.6f} SOL, only "
+                            f"{sol_budget / 10**SOL_DECIMALS:.6f} excess available; no prep swap"
+                        )
+                        continue
+                    a = assets.get(USDC_MINT) or {}
+                    prep_specs.append({
+                        "direction": "buy",
+                        "for_pool": target.get("pool_address"),
+                        "input_mint": SOL_MINT,
+                        "output_mint": USDC_MINT,
+                        "amount_raw": str(cost_lamports),
+                        "usd": cost_usd,
+                        "need_ui": need / 10**USDC_DECIMALS,
+                        "have_ui": have / 10**USDC_DECIMALS,
+                        "symbol": "USDC",
+                        "committed_usdc_raw": committed_usdc_raw,
+                    })
+                    sol_budget -= cost_lamports
                     continue
                 delta = need - have
                 if delta <= 0:
@@ -168,29 +225,69 @@ def plan_funding(
                     notes.append(f"pool {target['pool_address']}: side {side} price/decimals unknown; no prep swap")
                     continue
                 delta_ui = delta / (10 ** dec)
-                cost_raw = int(math.ceil(delta_ui * px * (1.0 + BUY_BUFFER_PCT / 100.0) * (10 ** USDC_DECIMALS)))
-                if cost_raw / (10 ** USDC_DECIMALS) < MIN_PREP_SWAP_USD:
+                # Notional cost of the exact delta, plus slippage/drift buffer.
+                cost_usd = delta_ui * px * (1.0 + BUY_BUFFER_PCT / 100.0)
+                if cost_usd < MIN_PREP_SWAP_USD:
                     continue
-                if cost_raw > budget:
+                cost_raw = int(math.ceil(cost_usd * (10 ** USDC_DECIMALS)))
+                a = assets.get(mint) or {}
+                symbol = a.get("symbol") or mint[:6]
+                if cost_raw <= usdc_budget:
+                    # USDC first: preserves today's behavior when it can pay.
+                    prep_specs.append({
+                        "direction": "buy",
+                        "for_pool": target.get("pool_address"),
+                        "input_mint": USDC_MINT,
+                        "output_mint": mint,
+                        "amount_raw": str(cost_raw),
+                        "usd": cost_usd,
+                        "need_ui": need / (10 ** dec),
+                        "have_ui": have / (10 ** dec),
+                        "symbol": symbol,
+                    })
+                    usdc_budget -= cost_raw
+                    continue
+                # USDC cannot cover it: fall back to excess SOL (direct hop).
+                # Never source the same mint: SOL->SOL is not a swap.
+                if mint == SOL_MINT:
                     notes.append(
-                        f"pool {target['pool_address']}: buy of {delta_ui:.6f} needs "
+                        f"pool {target['pool_address']}: buy of {delta_ui:.6f} SOL needs "
                         f"{cost_raw / 10**USDC_DECIMALS:.2f} USDC, only "
-                        f"{budget / 10**USDC_DECIMALS:.2f} available; no prep swap"
+                        f"{usdc_budget / 10**USDC_DECIMALS:.2f} available; "
+                        "SOL cannot fund its own side; no prep swap"
                     )
                     continue
-                a = assets.get(mint) or {}
+                if sol_price <= 0:
+                    notes.append(
+                        f"pool {target['pool_address']}: buy of {delta_ui:.6f} {symbol} needs "
+                        f"{cost_raw / 10**USDC_DECIMALS:.2f} USDC, only "
+                        f"{usdc_budget / 10**USDC_DECIMALS:.2f} available and SOL price unknown; "
+                        "no prep swap"
+                    )
+                    continue
+                cost_lamports = int(math.ceil(cost_usd / sol_price * 10**SOL_DECIMALS))
+                if cost_lamports > sol_budget:
+                    notes.append(
+                        f"pool {target['pool_address']}: buy of {delta_ui:.6f} {symbol} needs "
+                        f"{cost_raw / 10**USDC_DECIMALS:.2f} USDC, only "
+                        f"{usdc_budget / 10**USDC_DECIMALS:.2f} available; SOL fallback needs "
+                        f"{cost_lamports / 10**SOL_DECIMALS:.6f} SOL, only "
+                        f"{sol_budget / 10**SOL_DECIMALS:.6f} excess available; no prep swap"
+                    )
+                    continue
                 prep_specs.append({
                     "direction": "buy",
                     "for_pool": target.get("pool_address"),
-                    "input_mint": USDC_MINT,
+                    "input_mint": SOL_MINT,
                     "output_mint": mint,
-                    "amount_raw": str(cost_raw),
-                    "usd": cost_raw / (10 ** USDC_DECIMALS),
+                    "amount_raw": str(cost_lamports),
+                    "usd": cost_usd,
                     "need_ui": need / (10 ** dec),
                     "have_ui": have / (10 ** dec),
-                    "symbol": a.get("symbol") or mint[:6],
+                    "symbol": symbol,
+                    "committed_usdc_raw": committed_usdc_raw,
                 })
-                budget -= cost_raw
+                sol_budget -= cost_lamports
     elif not unfunded:
         # Full 50/50 rebalance: sell leftover surplus back to USDC.
         # Fires whenever no shortfall is pending, including when nothing is

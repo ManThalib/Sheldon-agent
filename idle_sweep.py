@@ -119,12 +119,19 @@ def _signal_usdc_committed(sig: dict) -> float:
     if action == "add_liquidity":
         return float(sig.get("position_usd") or 0.0)
     if action == "swap":
-        if sig.get("input_mint") != USDC_MINT:
-            return 0.0
+        total = 0.0
+        if sig.get("input_mint") == USDC_MINT:
+            try:
+                total += int(sig.get("amount") or 0) / 10**6
+            except (TypeError, ValueError):
+                pass
+        # A SOL-sourced prep swap spends no USDC, but the open it funds still
+        # needs its USDC side; the signal carries that raw amount.
         try:
-            return int(sig.get("amount") or 0) / 10**6
+            total += int(sig.get("usdc_side_raw") or 0) / 10**6
         except (TypeError, ValueError):
-            return 0.0
+            pass
+        return total
     return 0.0
 
 
