@@ -434,19 +434,27 @@
     "action": "close",
     "emit_time": 1792010935.5855734,
     "journal_decision": "failed",
+    "manual": true,
+    "note": "Ghost close: on-chain getAccountInfo null at slot ~457526905 (2026-10-16), position absent from history_complete scans 134848/141625, George dispatch failed at simulate (no tx). Owner-directed resolution 2026-10-16.",
     "pool_address": "3Mt1bpU3fnSXyPEm66HKKXyQTpLWrwYziPLqwTqK4ZT7",
     "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account Av5yMtESpfJ4BZvDW1CrxNSuej42vxDhb62Qawm8G2SP not found', 'error_name': 'Error'}",
     "rejected_at": 1792010940.0,
-    "status": "CLOSE_REVIEW_REQUIRED"
+    "resolved_at": 1792131742.6668987,
+    "resolved_at_iso": "2026-10-16T06:22:22Z",
+    "status": "CLOSE_RESOLVED"
   },
   "sheldon-1792010935-2": {
     "action": "close",
     "emit_time": 1792010935.5856156,
     "journal_decision": "failed",
+    "manual": true,
+    "note": "Ghost close: on-chain getAccountInfo null at slot ~457526905 (2026-10-16), position absent from history_complete scans 134848/141625, George dispatch failed at simulate (no tx). Owner-directed resolution 2026-10-16.",
     "pool_address": "C7hF6MvQwErhsf1KrFvnKzdArb9PsofFiwZdipo9c7cz",
     "reason": "chain dispatcher failed (1): {'ok': False, 'stage': 'dispatch', 'error': 'meteora getPosition failed: Position account GYQhA36Uj6b29a6PxEzhuKp2vQkLaxQpW6PHGckgeyfv not found', 'error_name': 'Error'}",
     "rejected_at": 1792010940.0,
-    "status": "CLOSE_REVIEW_REQUIRED"
+    "resolved_at": 1792131742.7181008,
+    "resolved_at_iso": "2026-10-16T06:22:22Z",
+    "status": "CLOSE_RESOLVED"
   },
   "sheldon-1792028936-1": {
     "action": "close",
@@ -501,5 +509,14 @@
     "pool_address": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
     "position_scan_verified_at": 1792036180.405085,
     "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1792144142-1": {
+    "action": "close",
+    "confirmed_at": 1792144156.0,
+    "emit_time": 1792144142.1424,
+    "journal_decision": "executed",
+    "pool_address": "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM",
+    "position_id": "8YmDiLwQA5Mjggm5VmBcpt5hiirdjDYmDzR1E1FntPNi",
+    "status": "CLOSE_EXECUTED"
   }
 }

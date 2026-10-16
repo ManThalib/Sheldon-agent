@@ -922,6 +922,32 @@
       "prep_for_pool": "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM",
       "signal_id": "sheldon-prep-1791987058-1",
       "status": "executed"
+    },
+    {
+      "confirmed_at": 1792140543.0,
+      "direction": "buy",
+      "emitted_at": 1792140536.5431995,
+      "in_amount": "50999658",
+      "input_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "key": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v|cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij|buy|HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM",
+      "out_amount": "62011",
+      "output_mint": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+      "prep_for_pool": "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM",
+      "signal_id": "sheldon-prep-1792140536-1",
+      "status": "executed"
+    },
+    {
+      "confirmed_at": 1792140570.0,
+      "direction": "buy",
+      "emitted_at": 1792140550.7145963,
+      "in_amount": "37252692",
+      "input_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "key": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v|So11111111111111111111111111111111111111112|buy|B5EwJVDuAauzUEEdwvbuXzbFFgEYnUqqS37TUM1c4PQA",
+      "out_amount": "349150085",
+      "output_mint": "So11111111111111111111111111111111111111112",
+      "prep_for_pool": "B5EwJVDuAauzUEEdwvbuXzbFFgEYnUqqS37TUM1c4PQA",
+      "signal_id": "sheldon-prep-1792140550-1",
+      "status": "executed"
     }
   ]
 }
