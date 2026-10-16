@@ -66,16 +66,23 @@ DEFAULT_CONFIG = {
     },
     "position_profiles": {
         "stable_stable": {
-            "weights": {"range_status": 35.0, "fee_capture": 25.0,
-                        "depeg_exposure": 25.0, "staleness": 15.0},
+            # RFNE-PLAN section 6: range centering 30 / fee efficiency 25 /
+            # net-yield coverage 25 / range efficiency 15, renormalized to
+            # 100 over the four active components (depeg stays additive-0;
+            # section 5's multiplier is the only depeg mechanism).
+            "weights": {"range_status": 31.58, "fee_capture": 26.32,
+                        "il_risk": 26.32, "staleness": 15.78,
+                        "depeg_exposure": 0.0},
         },
         "stable_bluechip": {
-            "weights": {"range_status": 30.0, "fee_capture": 20.0,
-                        "il_risk": 30.0, "staleness": 20.0},
+            "weights": {"range_status": 26.32, "fee_capture": 26.32,
+                        "il_risk": 31.58, "staleness": 15.78,
+                        "depeg_exposure": 0.0},
         },
         "bluechip_bluechip": {
-            "weights": {"range_status": 30.0, "fee_capture": 20.0,
-                        "il_risk": 30.0, "staleness": 20.0},
+            "weights": {"range_status": 26.32, "fee_capture": 26.32,
+                        "il_risk": 31.58, "staleness": 15.78,
+                        "depeg_exposure": 0.0},
         },
     },
     "pool_thresholds": {"open": 70.0, "watch": 55.0},
@@ -923,11 +930,21 @@ def score_position_staleness(pos: dict, max_pts: float) -> tuple:
     in_range_days = pos.get("in_range_days")
     total_days = pos.get("days_open")
 
-    if total_days is None or float(total_days) <= 0:
-        # No data yet: conservatively assume full efficiency
+    if total_days is None:
+        # No lifetime data at all (RFNE-PLAN section 7: "if neither is
+        # known, use unknown_credit partial credit"). Unknown data must
+        # not read as evidence — fail closed on data quality.
+        return round(max_pts * unknown_credit, 2), False
+    try:
+        total_days = float(total_days)
+    except (TypeError, ValueError):
+        return round(max_pts * unknown_credit, 2), False
+    if total_days < 0:
+        # Nonsense lifetime data: unknown, not full efficiency.
+        return round(max_pts * unknown_credit, 2), False
+    if total_days == 0:
+        # Brand-new position, no history yet: full efficiency credit.
         return round(max_pts, 2), True
-
-    total_days = float(total_days)
 
     # Determine in-range days:
     # If the record explicitly tracks in_range_days, use it.
@@ -1093,15 +1110,18 @@ def _score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
 
     total = round(clamp(sum(components.values())), 2)
     # NEW: apply depeg risk as a penalty multiplier (max 30% reduction).
-    # Depeg exposure of 1.0 (fully pegged) = no reduction; lower = more reduction.
+    # peg_frac 1.0 (fully pegged) => multiplier 1.0 (no reduction);
+    # peg_frac 0.0 (fully depegged) => multiplier 0.7 (max reduction).
     # This is separate from the additive component model; it caps the final score.
     try:
         depeg_pts, depeg_known = score_position_depeg_exposure(
             pos, 1.0, sym_x, sym_y, pool)  # pts is peg fraction 0-1
         if depeg_known and depeg_pts is not None:
-            # Clamp peg fraction to [0,1] and compute penalty: 1.0→0% reduction, 0→30% reduction
+            # Clamp peg fraction to [0,1]. Reduction grows as the peg slips:
+            # 1.0 - (1 - peg) * 0.3  ->  pegged pairs keep their score,
+            # depegged pairs lose at most 30% (RFNE-PLAN section 5).
             peg_frac = clamp(float(depeg_pts), 0.0, 1.0)
-            total = total * (1.0 - peg_frac * 0.3)
+            total = total * (1.0 - (1.0 - peg_frac) * 0.3)
     except Exception:
         pass  # if anything fails, keep total unchanged
     thr = cfg["position_thresholds"]

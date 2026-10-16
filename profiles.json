@@ -58,28 +58,28 @@
   "position_profiles": {
     "stable_stable": {
       "weights": {
-        "range_status": 30.0,
-        "fee_capture": 25.0,
-        "staleness": 25.0,
-        "il_risk": 20.0,
+        "range_status": 31.58,
+        "fee_capture": 26.32,
+        "il_risk": 26.32,
+        "staleness": 15.78,
         "depeg_exposure": 0.0
       }
     },
     "stable_bluechip": {
       "weights": {
-        "range_status": 30.0,
-        "fee_capture": 25.0,
-        "il_risk": 25.0,
-        "staleness": 20.0,
+        "range_status": 26.32,
+        "fee_capture": 26.32,
+        "il_risk": 31.58,
+        "staleness": 15.78,
         "depeg_exposure": 0.0
       }
     },
     "bluechip_bluechip": {
       "weights": {
-        "range_status": 30.0,
-        "fee_capture": 25.0,
-        "il_risk": 25.0,
-        "staleness": 20.0,
+        "range_status": 26.32,
+        "fee_capture": 26.32,
+        "il_risk": 31.58,
+        "staleness": 15.78,
         "depeg_exposure": 0.0
       }
     }

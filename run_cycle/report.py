@@ -13,6 +13,9 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
+# Where George's executor looks for pending signals (mirrors run_cycle.py).
+DEFAULT_SIGNALS_DIR = "/data/.openclaw/workspace-agents/george/agents/meteora-dlmm/signals/pending"
+
 
 def _utc_iso():
     """Return current time in Asia/Shanghai (UTC+8) ISO format."""
@@ -109,15 +112,26 @@ def _short_summary(report: dict, review: list = None) -> str:
     return " | ".join(parts)
 
 
-def _wake_george(signals_created: list, review: list):
+def _wake_george(signals_created: list, review: list, signals_dir: str = None):
     """Trigger the George signal doorbell immediately when signals are written.
 
     The doorbell automation checks signals/pending/ and sends George's main
     session a wake message only when fresh files are detected. The regular
     2-minute schedule remains as a fallback; this call shortens latency.
+
+    Only the LIVE queue wakes George: dry runs and harnesses that point
+    --signals-dir at a scratch directory must never ring the doorbell
+    (observed 2026-10-16: a scratch-dir --write-signals run paged the
+    doorbell automation for a signal George's queue did not contain).
     """
     if not signals_created:
         return
+    if signals_dir is not None:
+        live_dir = os.path.abspath(DEFAULT_SIGNALS_DIR)
+        if os.path.abspath(signals_dir) != live_dir:
+            print(f"WAKE_GEORGE skipped: signals dir {signals_dir} is not "
+                  f"the live queue {DEFAULT_SIGNALS_DIR}")
+            return
 
     # Doorbell automation ID (george-signal-wake).
     doorbell_id = "26a163bb-5e85-4fe8-ba99-8e584bc2e09e"

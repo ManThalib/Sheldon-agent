@@ -701,9 +701,15 @@ def main() -> int:
                     "evidence": None,
                     "reason": f"idle sweep write failed: {err}",
                 })
-        _wake_george(signals_created, review)
+        _wake_george(signals_created, review, args.signals_dir)
 
     append_log(report, args.memory_dir, signals_created, review)
+    # Surface signal review items (suppressed closes, skipped opens, deferred
+    # preps) in the JSON report too — previously only the non-JSON summary
+    # printed them, so --json consumers never saw why a verdict stayed
+    # signal-less (observed 2026-10-16 Cooper run).
+    if args.write_signals and review:
+        report["signals_review"] = review
 
     # Emit a machine-readable wake hint so the calling Sheldon session can
     # notify George immediately when actionable signals were written.

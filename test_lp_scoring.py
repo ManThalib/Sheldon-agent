@@ -267,8 +267,12 @@ class PositionComponentTests(unittest.TestCase):
         # known days_open assumes half efficiency (known=True).
         pts, known = score_position_staleness({"days_open": 10}, 20.0)
         self.assertEqual((pts, known), (10.0, True))
-        # No data yet: conservatively assume full efficiency (known=True).
+        # No lifetime data at all: unknown_credit partial credit, unknown
+        # (RFNE-PLAN section 7 fallback; fail-closed like every component).
         pts, known = score_position_staleness({"days_open": None}, 20.0)
+        self.assertEqual((pts, known), (10.0, False))
+        # Brand-new position (zero days): full credit, known.
+        pts, known = score_position_staleness({"days_open": 0}, 20.0)
         self.assertEqual((pts, known), (20.0, True))
 
     def test_staleness_erosion(self):
@@ -333,10 +337,12 @@ class PositionVerdictTests(unittest.TestCase):
         return pos
 
     def _pool(self):
+        # USDC price within the 0.5% depeg band (depeg_zero_dist): a 1% off
+        # price reads as full depeg and cuts 30% via the depeg multiplier.
         return {"name": "SOL-USDC", "pool_address": "p2",
                 "token_x_symbol": "SOL", "token_y_symbol": "USDC",
                 "realized_fee_apr": 100.0, "volatility": 8.0,
-                "token_x_price_usd": 1.01, "token_y_price_usd": 0.99}
+                "token_x_price_usd": 1.01, "token_y_price_usd": 0.999}
 
     def test_healthy_position_holds(self):
         result = score_position(self._base_pos(), {"p2": self._pool()})
@@ -452,8 +458,10 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(report["failures"], [])
         self.assertEqual(len(report["pool_scores"]), 1)
         self.assertEqual(len(report["position_scores"]), 1)
-        # New scoring model: pool score 83.83 (OPEN_CANDIDATE), position score 47.18 (REVIEW)
-        self.assertEqual(report["position_scores"][0]["verdict"], "REVIEW")
+        # RFNE model: centered in-range position, fees captured but thin vs
+        # the 150% APR pool, unknowns empty, depeg multiplier ~no-op
+        # (USDC pegged) -> score 67.4, HOLD.
+        self.assertEqual(report["position_scores"][0]["verdict"], "HOLD")
 
     def test_end_to_end_close_with_full_data(self):
         pool = {

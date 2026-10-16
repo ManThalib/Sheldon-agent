@@ -7,6 +7,7 @@ entry points (score_position, score_position_missy).
 
 import math
 from scoring.config import get_config
+from scoring.helpers import clamp
 
 
 U64_MAX = (1 << 64) - 1
@@ -166,8 +167,15 @@ def score_position_range_status(pos: dict, max_pts: float) -> tuple:
 
 
 def score_position_fee_capture(pos: dict, max_pts: float, pool: dict) -> tuple:
-    """Fees earned vs expected. Expected fees are estimated from the pool's
-    realized APR when Missy does not provide them."""
+    """Fees earned vs expected, with APR normalization for fair comparison
+    across pools with different fee rates.
+
+    Efficiency = (daily fee yield) / (pool's potential daily yield from APR).
+    A position in a 10% APR pool capturing 40% of fees is more impressive
+    than one in a 2% APR pool capturing 80% of fees.
+
+    Falls back to raw ratio if APR-normalization data is unavailable.
+    """
     unknown_credit = float(get_config()["constants"]["unknown_credit"])
     fees = _fees_usd_or_none(pos)
     if fees is None:
@@ -176,6 +184,25 @@ def score_position_fee_capture(pos: dict, max_pts: float, pool: dict) -> tuple:
     if expected is None or expected <= 0:
         return round(max_pts * unknown_credit, 2), False
     ratio = fees / expected
+
+    # APR normalization: compare fee yield to pool's realized APR potential.
+    pool_apr = float((pool or {}).get("realized_fee_apr") or 0.01)
+    value = pos.get("current_value_usd")
+    days = pos.get("days_open")
+    if value is not None and float(value) > 0 and days is not None and float(days) > 0:
+        daily_fee_yield = float(fees) / float(days)
+        pool_daily_yield = float(value) * (pool_apr / 100.0) / 365.0
+        if pool_daily_yield > 0:
+            efficiency = daily_fee_yield / pool_daily_yield
+            # Normalized efficiency: 1.0 = captured full APR yield,
+            # 0.5 = captured half, etc. Cap at 2x so very high captures
+            # don't dominate, then blend with the raw capture ratio.
+            efficiency_norm = clamp(efficiency, 0.0, 2.0)
+            # Blend: 70% efficiency, 30% raw ratio for balanced signaling
+            blended = 0.7 * efficiency_norm + 0.3 * ratio
+            return round(max_pts * clamp(blended, 0.0, 1.0), 2), True
+
+    # Fallback: original ratio when APR data is missing
     return round(max_pts * clamp(ratio, 0.0, 1.0), 2), True
 
 
@@ -296,12 +323,21 @@ def score_position_staleness(pos: dict, max_pts: float) -> tuple:
     in_range_days = pos.get("in_range_days")
     total_days = pos.get("days_open")
 
-    if total_days is None or float(total_days) <= 0:
-        # No data yet: conservatively assume full efficiency
+    if total_days is None:
+        # No lifetime data at all (RFNE-PLAN section 7: "if neither is
+        # known, use unknown_credit partial credit"). Unknown data must
+        # not read as evidence — fail closed on data quality.
+        return round(max_pts * unknown_credit, 2), False
+    try:
+        total_days = float(total_days)
+    except (TypeError, ValueError):
+        return round(max_pts * unknown_credit, 2), False
+    if total_days < 0:
+        # Nonsense lifetime data: unknown, not full efficiency.
+        return round(max_pts * unknown_credit, 2), False
+    if total_days == 0:
+        # Brand-new position, no history yet: full efficiency credit.
         return round(max_pts, 2), True
-
-    total_days = float(total_days)
-    in_range = False is None and pos.get("in_range") is not None
 
     # Determine in-range days:
     # If the record explicitly tracks in_range_days, use it.
@@ -361,14 +397,18 @@ def score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
     total = round(clamp(sum(components.values())), 2)
     cfg = get_config()
     # NEW: apply depeg risk as a penalty multiplier (max 30% reduction).
-    # Depeg exposure of 1.0 (fully pegged) = no reduction; lower = more reduction.
+    # peg_frac 1.0 (fully pegged) => multiplier 1.0 (no reduction);
+    # peg_frac 0.0 (fully depegged) => multiplier 0.7 (max reduction).
     # This is separate from the additive component model; it caps the final score.
     try:
         depeg_pts, depeg_known = score_position_depeg_exposure(
             pos, 1.0, sym_x, sym_y, pool)  # pts is peg fraction 0-1
         if depeg_known and depeg_pts is not None:
+            # Clamp peg fraction to [0,1]. Reduction grows as the peg slips:
+            # 1.0 - (1 - peg) * 0.3  ->  pegged pairs keep their score,
+            # depegged pairs lose at most 30% (RFNE-PLAN section 5).
             peg_frac = clamp(float(depeg_pts), 0.0, 1.0)
-            total = total * (1.0 - peg_frac * 0.3)
+            total = total * (1.0 - (1.0 - peg_frac) * 0.3)
     except Exception:
         pass  # if anything fails, keep total unchanged
     thr = cfg["position_thresholds"]

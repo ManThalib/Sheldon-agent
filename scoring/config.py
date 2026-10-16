@@ -29,17 +29,23 @@ DEFAULT_CONFIG = {
         },
     },
     "position_profiles": {
+        # RFNE-PLAN section 6: renormalized over the four active components;
+        # depeg stays additive-0 (section 5's multiplier is the only depeg
+        # mechanism).
         "stable_stable": {
-            "weights": {"range_status": 35.0, "fee_capture": 25.0,
-                        "depeg_exposure": 25.0, "staleness": 15.0},
+            "weights": {"range_status": 31.58, "fee_capture": 26.32,
+                        "il_risk": 26.32, "staleness": 15.78,
+                        "depeg_exposure": 0.0},
         },
         "stable_bluechip": {
-            "weights": {"range_status": 30.0, "fee_capture": 20.0,
-                        "il_risk": 30.0, "staleness": 20.0},
+            "weights": {"range_status": 26.32, "fee_capture": 26.32,
+                        "il_risk": 31.58, "staleness": 15.78,
+                        "depeg_exposure": 0.0},
         },
         "bluechip_bluechip": {
-            "weights": {"range_status": 30.0, "fee_capture": 20.0,
-                        "il_risk": 30.0, "staleness": 20.0},
+            "weights": {"range_status": 26.32, "fee_capture": 26.32,
+                        "il_risk": 31.58, "staleness": 15.78,
+                        "depeg_exposure": 0.0},
         },
     },
     "pool_thresholds": {"open": 70.0, "watch": 55.0},
