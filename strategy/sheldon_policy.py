@@ -71,6 +71,13 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["sol"] = dict(data.get("sol") or {})
     policy["rotation"] = dict(data.get("rotation") or {})
 
+    # Duplicate-close ghost guards and reopen cooldown (2026-10-16).
+    # close_emission rails defer automated close emission; the cooldown
+    # suppresses re-opening a pool right after its close settles.
+    policy["close_emission"] = dict(data.get("close_emission") or {})
+    policy["reopen_cooldown_seconds"] = float(
+        data.get("reopen_cooldown_seconds", 2700.0))
+
     return policy
 
 

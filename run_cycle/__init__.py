@@ -116,7 +116,8 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                   min_position_usd: float = 20.0,
                   supported_dexes: set = None,
                   state_dir: str = None,
-                  journal_dir: str = None) -> tuple:
+                  journal_dir: str = None,
+                  close_emission: dict = None) -> tuple:
     """Backward-compatible wrapper for run_cycle.signals.write_signals."""
     from run_cycle.signals import write_signals as _f
     return _f(report, signals_dir, positions_dir,
@@ -124,7 +125,8 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
               min_position_usd=min_position_usd,
               supported_dexes=supported_dexes,
               state_dir=state_dir,
-              journal_dir=journal_dir)
+              journal_dir=journal_dir,
+              close_emission=close_emission)
 
 
 def append_log(report: dict, memory_dir: str, signals_created: list, review: list):

@@ -8,6 +8,7 @@ Contains:
 """
 
 from datetime import datetime, timedelta, timezone
+import time
 from typing import Any, Dict, Tuple
 
 # Constants
@@ -115,7 +116,8 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
                             policy_windows: dict, min_score: float,
                             min_liquidity: float, min_volume: float,
                             allowed_bin_steps: set, reserved_pools: set = None,
-                            ctx: dict = None) -> tuple:
+                            ctx: dict = None,
+                            cooldown_pools: dict = None) -> tuple:
     """Drop open candidates that must not become signals.
 
     Honors Missy's eligibility flag when present (the default path after
@@ -127,6 +129,12 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
     are rotation targets of pending rotations. Candidates for these pools
     are skipped (with a review reason) until the source close settles —
     they re-enter the normal open flow on a later cycle.
+
+    A ``cooldown_pools`` map (pool_address -> earliest reopen timestamp)
+    enforces the reopen cooldown after a settled close (2026-10-16
+    anti-churn rail): a pool closed moments ago must not re-open in the
+    same burst. Expired cooldowns are transparent; closes/claims are never
+    affected (opens only pass through this filter).
 
     Returns (kept, skipped) tuples.
     """
@@ -160,6 +168,12 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
         if is_held:
             skipped.append({**base,
                             "reason": "already holding a position in this pool (dedup)"})
+            continue
+        cooldown_until = (cooldown_pools or {}).get(addr)
+        if cooldown_until and time.time() < float(cooldown_until):
+            skipped.append({**base,
+                            "reason": f"reopen cooldown after close "
+                                      f"({int(float(cooldown_until) - time.time())}s remaining)"})
             continue
         if addr in seen:
             skipped.append({**base,

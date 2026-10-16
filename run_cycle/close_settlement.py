@@ -161,7 +161,7 @@ def classify_rejection(reason: str) -> str:
 
 def mark_emitted(state: Dict[str, Dict[str, Any]], signal_id: str,
                  pool_address: Optional[str], now_ts: float = None,
-                 action: str = "close") -> None:
+                 action: str = "close", position_id: str = None) -> None:
     """Record CLOSE_EMITTED for a freshly written close signal (Change G).
 
     A new emit for a pool supersedes that pool's earlier rejected attempts
@@ -187,6 +187,7 @@ def mark_emitted(state: Dict[str, Dict[str, Any]], signal_id: str,
     state[signal_id] = {
         "status": "CLOSE_EMITTED",
         "pool_address": pool_address,
+        "position_id": position_id or None,
         "action": action,
         "emit_time": now_ts,
     }
@@ -459,6 +460,134 @@ def _epoch(value: Any) -> float:
             return 0.0
     return 0.0
 
+def _latest_settlement_ts(entry: Dict[str, Any]) -> float:
+    """Latest settlement-progress timestamp stored on one entry.
+
+    Covers every ladder stamp plus manual resolutions: any of these means
+    "a close event was processed for this pool at this time".
+    """
+    return max(
+        _epoch(entry.get("funds_verified_at")),
+        _epoch(entry.get("resolved_at")),
+        _epoch(entry.get("chain_verified_at")),
+        _epoch(entry.get("confirmed_at")),
+    )
+
+
+def close_emit_suppressions(close_state: Dict[str, Dict[str, Any]],
+                            position_mtime: float,
+                            now: float = None,
+                            policy: Optional[Dict[str, Any]] = None,
+                            ) -> Tuple[Optional[str], Dict[str, str]]:
+    """Suppression reasons for emitting NEW close signals (2026-10-16).
+
+    The 2026-10-14/15 ghost families were all the same race: a close
+    executed on-chain, the next cycle read a position scan taken BEFORE the
+    execution, and re-emitted a close for the already-closed position.
+    George's failed "Position not found" dispatch then wedged the
+    settlement gate until a human resolved it.
+
+    Returns ``(global_reason, per_pool)``:
+
+    * ``global_reason`` — set when the position scan is stale (older than
+      ``close_emission.max_scan_age_seconds``) or missing: no scan, no
+      proof any position still exists, so no automated close emission.
+    * ``per_pool`` — pool_address -> reason when the pool's latest close
+      settlement event is NEWER than the position scan: that scan cannot
+      prove anything about a position closed after it was taken.
+
+    These rails defer SHELDON's automated emission only (the verdict
+    surfaces as a review item and a fresh scan re-enables it). They never
+    block George-side or owner closes — closing is always allowed.
+    """
+    now = time.time() if now is None else now
+    ce = (policy or {}).get("close_emission") or {}
+    global_reason: Optional[str] = None
+    if ce.get("require_fresh_scan", True):
+        max_age = float(ce.get("max_scan_age_seconds", 900.0))
+        if not position_mtime:
+            global_reason = ("position scan missing; refusing to close "
+                             "on no evidence (fail-closed)")
+        elif (now - position_mtime) > max_age:
+            global_reason = (f"position scan stale for close emission "
+                             f"(age {now - position_mtime:.0f}s > "
+                             f"{max_age:.0f}s)")
+    per_pool: Dict[str, str] = {}
+    if ce.get("require_scan_newer_than_last_close", True) and position_mtime:
+        for sid, entry in close_state.items():
+            if not isinstance(entry, dict):
+                continue
+            pool = entry.get("pool_address")
+            if not pool or pool in per_pool:
+                continue
+            ts = _latest_settlement_ts(entry)
+            if ts and position_mtime < ts:
+                per_pool[pool] = (f"pool has a close-settlement event newer "
+                                  f"than the position scan (signal {sid}); "
+                                  f"scan cannot prove the position still "
+                                  f"exists — duplicate-emit guard")
+    return global_reason, per_pool
+
+
+def position_close_pending(close_state: Dict[str, Dict[str, Any]],
+                           pool_address: Optional[str],
+                           position_id: Optional[str],
+                           ) -> Optional[str]:
+    """Signal id of a non-settled close already in flight for one position.
+
+    Position-level idempotency: a pool may legitimately receive a new
+    position after an old one closes, so matching is by position_id (with
+    a pool consistency check), never by pool alone. Settled entries never
+    match — a settled close plus a fresh scan listing the position again
+    means a NEW position, which must stay closeable.
+    """
+    if not position_id:
+        return None
+    for sid, entry in close_state.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") in SETTLED_STATUSES:
+            continue
+        if entry.get("position_id") != position_id:
+            continue
+        if pool_address and entry.get("pool_address") not in (
+                None, pool_address):
+            continue
+        return sid
+    return None
+
+
+def close_cooldown_pools(close_state: Dict[str, Dict[str, Any]],
+                         now: float = None,
+                         cooldown_seconds: float = 2700.0,
+                         ) -> Dict[str, float]:
+    """Map pool_address -> earliest reopen timestamp after a settled close.
+
+    Anti-churn rail (2026-10-16): a pool whose close settled moments ago
+    should not re-open in the same cycle burst — the immediate re-open was
+    half of every churn family (close -> ghost duplicate -> re-open ->
+    repeat). Only settled entries count; unsettled entries already block
+    opens via the settlement gate. ``cooldown_seconds <= 0`` disables the
+    rail. Read-only: this never blocks closes, claims or removes.
+    """
+    if not cooldown_seconds or cooldown_seconds <= 0:
+        return {}
+    out: Dict[str, float] = {}
+    for entry in close_state.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") not in SETTLED_STATUSES:
+            continue
+        pool = entry.get("pool_address")
+        if not pool:
+            continue
+        ts = _latest_settlement_ts(entry)
+        if ts:
+            out[pool] = max(out.get(pool, 0.0),
+                            ts + float(cooldown_seconds))
+    return out
+
+
 def prune_settled(state: Dict[str, Dict[str, Any]], now: float = None,
                   max_age_seconds: float = 30 * 24 * 3600
                   ) -> Dict[str, Dict[str, Any]]:
@@ -595,10 +724,12 @@ def record_emitted_closes(state_dir: str, signals_created: list) -> list:
             continue
         mark_emitted(
             state, emitted["signal_id"], emitted.get("pool_address"),
-            now_ts=time.time(), action=emitted.get("action"))
+            now_ts=time.time(), action=emitted.get("action"),
+            position_id=emitted.get("position_id"))
         emitted_closes.append({
             "signal_id": emitted["signal_id"],
             "pool_address": emitted.get("pool_address"),
+            "position_id": emitted.get("position_id"),
         })
         changed = True
     if changed:

@@ -60,6 +60,13 @@
   "execution_intent": {
     "default_max_slippage_bps": 100
   },
+  "close_emission": {
+    "_comment": "2026-10-16 duplicate-close ghost guards. Automated close emission is deferred (review item) when: the position scan is older than max_scan_age_seconds, the pool has a close-settlement event newer than the position scan (the scan cannot prove the position still exists), or a close for the same position_id is already in flight. Never blocks George-side or owner closes; claims unaffected.",
+    "require_fresh_scan": true,
+    "max_scan_age_seconds": 900,
+    "require_scan_newer_than_last_close": true
+  },
+  "reopen_cooldown_seconds": 2700,
   "add_policy": {
     "enabled": true,
     "idle_max_usd": 20,

@@ -114,6 +114,7 @@ def _save_rotation_state(state_dir: str, state: dict) -> None:
 from run_cycle.close_settlement import (  # noqa: E402
     CLOSE_STATE_FILENAME,
     check_settlement,
+    close_cooldown_pools,
     load_close_state as _load_close_state,
     mark_emitted,
     record_emitted_closes,
@@ -457,6 +458,9 @@ def main() -> int:
         min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
         allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
         reserved_pools=pending_targets,
+        cooldown_pools=close_cooldown_pools(
+            close_state, now=now_ts,
+            cooldown_seconds=_POLICY.get("reopen_cooldown_seconds", 2700.0)),
     )
     report["open_skipped"] = open_skipped
     report["strategies"] = build_strategies(kept_candidates, wallet)
@@ -642,6 +646,7 @@ def main() -> int:
             min_position_usd=_POLICY.get("min_position_usd", 20.0),
             supported_dexes=SUPPORTED_DEXES,
             state_dir=args.state_dir,
+            close_emission=_POLICY.get("close_emission") or {},
         )
 
         review.extend(signal_review)

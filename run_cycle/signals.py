@@ -18,6 +18,11 @@ from datetime import datetime, timedelta, timezone
 from readiness import build_prep_swap_signal
 from readiness import prep_ledger
 from readiness import prep_ledger
+from run_cycle.close_settlement import (
+    close_emit_suppressions,
+    position_close_pending,
+    load_close_state,
+)
 
 
 def _utc_iso():
@@ -122,7 +127,8 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                   min_position_usd: float = 20.0,
                   supported_dexes: set = None,
                   state_dir: str = None,
-                  journal_dir: str = None) -> tuple:
+                  journal_dir: str = None,
+                  close_emission: dict = None) -> tuple:
     """Convert verdicts into George-schema signal files.
 
     Returns:
@@ -132,6 +138,13 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
 
     When ``state_dir`` is set, each emitted prep swap is recorded in the prep
     ledger so the next cycle can suppress a duplicate by state, not by clock.
+    Duplicate-close ghost guards (2026-10-16) are also settlement-state
+    derived and therefore active only when ``state_dir`` is provided: the
+    close family (CLOSE/REBALANCE/ROTATE) is suppressed while the position
+    scan is stale, while the pool settled a close after the scan was taken,
+    or while a close for the same position is already in flight. Claims
+    (COLLECT_FEES) are never guarded — nothing here can block a close or a
+    claim; these rails only defer Sheldon's automated emission.
     """
     if supported_dexes is None:
         supported_dexes = {"meteora", "raydium", "orca"}
@@ -140,6 +153,16 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
     active = _load_active_positions(positions_dir)
     created = []
     review = []
+
+    # Duplicate-close ghost guards: computed once per call from the
+    # settlement state and the position scan mtime (state_dir-gated).
+    close_state = load_close_state(state_dir) if state_dir else {}
+    close_global_reason = None
+    close_pool_reasons: dict = {}
+    if state_dir:
+        close_global_reason, close_pool_reasons = close_emit_suppressions(
+            close_state, _position_scan_mtime(positions_dir),
+            policy={"close_emission": close_emission or {}})
 
     # Dedup/center-guard drops from main() surface as review items so the
     # report explains why a high-scoring pool produced no signal.
@@ -312,6 +335,30 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                                f"within the re-emit window (bug #6 gate)"),
                 })
                 continue
+            # Duplicate-close ghost guards (2026-10-16): close family only.
+            if action in {"CLOSE", "REBALANCE", "ROTATE"}:
+                suppress = close_global_reason or close_pool_reasons.get(pool_addr)
+                if suppress:
+                    review.append({
+                        "pool_address": pool_addr,
+                        "dex": dex,
+                        "score": v.get("score"),
+                        "evidence": None,
+                        "reason": f"{action} suppressed: {suppress}",
+                    })
+                    continue
+                pending_sid = position_close_pending(close_state, pool_addr, pos_id)
+                if pending_sid:
+                    review.append({
+                        "pool_address": pool_addr,
+                        "dex": dex,
+                        "score": v.get("score"),
+                        "evidence": None,
+                        "reason": (f"{action} suppressed: close {pending_sid} "
+                                   f"already in flight for position {pos_id} "
+                                   f"(position-level idempotency)"),
+                    })
+                    continue
             lower = v.get("lower_bound")
             upper = v.get("upper_bound")
             try:
@@ -367,6 +414,18 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
         idx += 1
 
     return created, review
+
+
+def _position_scan_mtime(positions_dir: str) -> float:
+    """Mtime of the newest position scan, or 0.0 when none is readable."""
+    import lp_scoring
+    pos_path = lp_scoring.newest_file(positions_dir, "position_scan")
+    if not pos_path:
+        return 0.0
+    try:
+        return os.path.getmtime(pos_path)
+    except OSError:
+        return 0.0
 
 
 def _load_active_positions(positions_dir: str) -> dict:
