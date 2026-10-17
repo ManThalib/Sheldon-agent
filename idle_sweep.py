@@ -136,24 +136,26 @@ def _signal_usdc_committed(sig: dict) -> float:
 
 
 def scan_committed_usdc(signals_dir: str, now: Optional[float] = None) -> Tuple[float, int]:
-    """Sum USDC committed by Sheldon signals still in George's queues.
+    """Sum USDC committed by Sheldon signals still WAITING to execute.
 
     Covers open (position_usd), swap-to-buy (amount when input is USDC),
-    and this module's own add_liquidity signals. Any presence in
-    pending/processed/failed_verify counts: processed means executed but
-    possibly not yet reflected in a wallet rescan; failed_verify means the
-    tx may still have landed (verification failed, not execution).
+    and this module's own add_liquidity signals. Only the pending queue
+    counts (2026-10-17 fix, live net_idle -$1700.49 vs queued 1723.04:
+    the old roots also summed processed/ + failed_verify/ within 24h — a
+    24h open FLOW including already-closed positions, subtracted from an
+    idle STOCK of $22.55). Executed opens leave the wallet into LP
+    positions the wallet screen never counted as idle, so counting them
+    here double-subtracts. Verification failures are not execution
+    failures, but a failed-verify open is also out of the wallet when it
+    did land; the wallet rescan after execution is the real backstop, and
+    George's signal_max_age_seconds rail cleans stragglers.
 
-    Unreadable files are skipped. Signal age is not a filter here: George
-    moves files out of pending on processing, and his own
-    signal_max_age_seconds rail cleans stragglers. Signals older than 24h
-    are ignored (a stale file George will never execute must not freeze
-    capital forever; the wallet rescan is the real backstop).
+    Unreadable files are skipped. Signals older than 24h are ignored (a
+    stale file George will never execute must not freeze capital forever).
     """
     now = now if now is not None else time.time()
     parent = os.path.dirname(signals_dir.rstrip("/"))
-    roots = {signals_dir, os.path.join(parent, "pending"),
-             os.path.join(parent, "processed"), os.path.join(parent, "failed_verify")}
+    roots = {signals_dir, os.path.join(parent, "pending")}
     total = 0.0
     count = 0
     for root in roots:

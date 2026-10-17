@@ -143,14 +143,25 @@ class TestCommittedScan(SweepTestBase):
             json.dump({"action": "swap", "input_mint": USDC_MINT,
                        "amount": "7000000",
                        "created_at": "2026-10-01T00:00:00+08:00"}, fh)
-        processed = os.path.join(os.path.dirname(self.signals_dir), "processed")
-        os.makedirs(processed, exist_ok=True)
-        with open(os.path.join(processed, "sheldon-sweep-3.json"), "w") as fh:
-            json.dump({"action": "add_liquidity", "position_usd": 6.0,
-                       "created_at": "2026-10-01T00:00:00+08:00"}, fh)
         total, n = scan_committed_usdc(self.signals_dir, now=NOW)
-        self.assertAlmostEqual(total, 34.0)
-        self.assertEqual(n, 3)
+        self.assertAlmostEqual(total, 28.0)
+        self.assertEqual(n, 2)
+
+    def test_processed_and_failed_verify_never_count(self):
+        # 2026-10-17 fix: executed signals (processed/) and failed-verify
+        # signals are no longer "committed" — the capital already left the
+        # wallet into LP positions the wallet screen never counted as idle.
+        # Live vector: 24h churn flow ($1723) against a $22.55 idle stock
+        # produced net_idle -$1700.49 and starved the sweep.
+        for sub in ("processed", "failed_verify", "pending"):
+            d = os.path.join(os.path.dirname(self.signals_dir), sub)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "sheldon-sweep-x.json"), "w") as fh:
+                json.dump({"action": "add_liquidity", "position_usd": 6.0,
+                           "created_at": "2026-10-01T00:00:00+08:00"}, fh)
+        total, n = scan_committed_usdc(self.signals_dir, now=NOW)
+        self.assertAlmostEqual(total, 6.0)   # only the pending copy counts
+        self.assertEqual(n, 1)
 
     def test_sell_swaps_and_aged_signals_do_not_count(self):
         with open(os.path.join(self.signals_dir, "sheldon-prep-sell.json"), "w") as fh:

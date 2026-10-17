@@ -8,11 +8,19 @@ from .signal_usdc import _signal_usdc_committed
 
 
 def scan_committed_usdc(signals_dir: str, now: Optional[float] = None) -> Tuple[float, int]:
-    """Sum USDC committed by Sheldon signals still in George's queues."""
+    """Sum USDC committed by Sheldon signals still waiting to execute.
+
+    Only UNEXECUTED signals count: pending queue files. Live 2026-10-17
+    (sweep net_idle -$1700.49 vs queued 1723.04): the old roots also summed
+    processed/ and failed_verify/ within 24h — cumulative opens INCLUDING
+    positions already closed again, i.e. a 24h flow mistaken for a stock.
+    Executed opens leave the wallet (capital sits in LP positions, which the
+    wallet screen's idle-USDC number never counted anyway), so processed/
+    failed_verify/ files are exactly the ones that must NOT be subtracted.
+    """
     now = now if now is not None else time.time()
     parent = os.path.dirname(signals_dir.rstrip("/"))
-    roots = {signals_dir, os.path.join(parent, "pending"),
-             os.path.join(parent, "processed"), os.path.join(parent, "failed_verify")}
+    roots = {signals_dir, os.path.join(parent, "pending")}
     total = 0.0
     count = 0
     for root in roots:

@@ -391,6 +391,20 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 "reason": sig_reason,
                 "created_at": _utc_iso(),
             }
+            if action != "COLLECT_FEES":
+                repaired = _repair_close_position_id(signal, v, positions_dir)
+                if repaired is None:
+                    review.append({
+                        "pool_address": pool_addr,
+                        "dex": dex,
+                        "score": v.get("score"),
+                        "evidence": v.get("evidence"),
+                        "reason": ("close demoted: no unambiguous position_id "
+                                   "on verdict or in fresh scan (would be "
+                                   "rejected downstream)"),
+                    })
+                    continue
+                signal = repaired
         else:
             # HOLD, REVIEW, WATCH, IGNORE => no signal.
             continue
@@ -446,3 +460,48 @@ def _load_active_positions(positions_dir: str) -> dict:
     positions = data.get("positions", []) if isinstance(data, dict) else data
     return {p.get("pool_address"): p for p in positions
             if p.get("pool_address") and p.get("status") != "closed"}
+
+
+def _repair_close_position_id(signal: dict, verdict: dict,
+                              positions_dir: str) -> dict:
+    """Fill a close signal's missing position_id from the freshest scan.
+
+    Live 2026-10-17 (sheldon-1792169350-1): a close verdict reached the
+    writer with an empty ``position`` field; George's validator correctly
+    rejected it ('close requires position_id') and a retry 52s later
+    succeeded after the id appeared. Sheldon owns the signal, so the fix
+    belongs here: repair from the freshest position scan when exactly one
+    open row exists on the pool (unambiguous); never guess with more than
+    one candidate — demote to a review item instead.
+    Returns the (possibly repaired) signal, or None to demote.
+    """
+    if signal.get("position_id"):
+        return signal
+    import lp_scoring
+    pool_addr = signal.get("pool_address")
+    pos_path = lp_scoring.newest_file(positions_dir, "position_scan")
+    candidates = []
+    if pos_path and pool_addr:
+        try:
+            data = lp_scoring.load_json(pos_path)
+        except Exception:
+            data = {}
+        rows = data.get("positions", []) if isinstance(data, dict) else data
+        for row in rows or []:
+            if not isinstance(row, dict) or row.get("pool_address") != pool_addr:
+                continue
+            if str(row.get("status") or "").lower() in {
+                    "closed", "closed_empty", "empty", "inactive"}:
+                continue
+            pid = (row.get("position_id") or row.get("position_address")
+                   or row.get("position_mint"))
+            if pid:
+                candidates.append(str(pid))
+    if len(candidates) == 1:
+        signal["position_id"] = candidates[0]
+        signal["reason"] = (
+            f"{signal.get('reason', '')}; position_id repaired from fresh "
+            f"scan (verdict carried none)"
+        )
+        return signal
+    return None
