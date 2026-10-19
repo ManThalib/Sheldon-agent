@@ -522,5 +522,19 @@
     "position_id": "8YmDiLwQA5Mjggm5VmBcpt5hiirdjDYmDzR1E1FntPNi",
     "position_scan_verified_at": 1792147729.392885,
     "status": "FUNDS_VERIFIED"
+  },
+  "sheldon-1792251810-1": {
+    "action": "close",
+    "emit_time": 1792251810.1308947,
+    "pool_address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "position_id": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "status": "CLOSE_EMITTED"
+  },
+  "sheldon-1792251810-2": {
+    "action": "close",
+    "emit_time": 1792251810.1309292,
+    "pool_address": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y",
+    "position_id": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y",
+    "status": "CLOSE_EMITTED"
   }
 }

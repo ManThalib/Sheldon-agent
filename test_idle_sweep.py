@@ -411,20 +411,54 @@ class TestReserveConfirm(SweepTestBase):
         self.assertEqual(saved["pending_reservation"]["signal_id"],
                          "sheldon-sweep-123")
 
-    def test_state_save_failure_aborts_before_signal(self):
-        # Unwritable state dir -> tmp write fails -> no signal either.
-        with open(os.path.join(self.state_dir, "keep.txt"), "w") as fh:
-            fh.write("x")
-        os.chmod(self.state_dir, 0o555)
-        try:
+    def test_state_save_failure_aborts_before_signal_mocked(self):
+        # Deterministic fixture: mock the persistence layer itself to fail.
+        # No filesystem permissions involved, so this cannot become a no-op
+        # when the suite runs as root (uid 0 ignores mode bits) and cannot
+        # depend on the filesystem flavour.
+        with patch.object(idle_sweep, "save_add_state", return_value=False) as mocked:
             ok, err = execute_sweep(self._signal(), self.signals_dir, {},
                                     state_dir=self.state_dir, now=NOW)
-            self.assertFalse(ok)
-            self.assertIn("could not persist", err)
-            self.assertFalse(os.path.exists(os.path.join(
-                self.signals_dir, "sheldon-sweep-123.json")))
-        finally:
-            os.chmod(self.state_dir, 0o755)
+        self.assertEqual(mocked.call_count, 1,
+                         "save_add_state should be attempted exactly once")
+        self.assertFalse(ok)
+        self.assertIn("could not persist", err)
+        # The safety property: no signal when the reservation could not land.
+        self.assertFalse(os.path.exists(os.path.join(
+            self.signals_dir, "sheldon-sweep-123.json")))
+        # And no reservation was left behind either.
+        self.assertFalse(os.path.exists(os.path.join(
+            self.state_dir, "add_state.json")))
+
+    def test_state_save_failure_aborts_before_signal(self):
+        # Integration-level companion to the mocked test above: exercise the
+        # real save_add_state failure branch with a structural (not
+        # permission-based) fault. The state path is a regular FILE, so
+        # makedirs(dirname) raises NotADirectoryError for every uid,
+        # including root.
+        #
+        # Deliberately not a chmod trick: the suite runs as root, and root
+        # ignores permission bits, so os.chmod(state_dir, 0o555) would still
+        # let the write succeed and this test would assert nothing.
+        blocker = os.path.join(self._tmp.name, "state_is_a_file")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        ok, err = execute_sweep(self._signal(), self.signals_dir, {},
+                                state_dir=blocker, now=NOW)
+        self.assertFalse(ok)
+        self.assertIn("could not persist", err)
+        # The safety property: no signal when the reservation could not land.
+        self.assertFalse(os.path.exists(os.path.join(
+            self.signals_dir, "sheldon-sweep-123.json")))
+
+    def test_state_save_failure_is_not_swallowed_by_root(self):
+        # Guards the guard: proves save_add_state really returns False on this
+        # input, so the test above cannot silently pass for the wrong reason.
+        blocker = os.path.join(self._tmp.name, "state_is_a_file_2")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        self.assertFalse(idle_sweep.save_add_state({"day_counts": {}}, blocker))
+        self.assertFalse(os.path.exists(os.path.join(blocker, "add_state.json")))
 
 
 if __name__ == "__main__":

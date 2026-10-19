@@ -20,28 +20,34 @@ def _utc_iso():
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
-def _meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None) -> Tuple[bool, str]:
+def _meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None,
+                              allowed_bin_steps: set = None,
+                              ) -> Tuple[bool, str]:
     """Return (allowed, reason) for a Meteora pool's bin_step rail.
 
     Fail-closed: an unknown bin_step counts as disallowed. Non-Meteora
     pools are always allowed (bins are a DLMM concept). Callers that know
     the dex should pass it — Missy _pool records may lack a dex field.
     """
-    from strategy.sheldon_policy import ALLOWED_METEORA_BIN_STEPS
+    from strategy.bin_step_rail import meteora_bin_step_allowed
 
     dex = (dex or pool.get("dex") or "").lower()
     if dex != "meteora":
         return True, ""
-    bin_step = pool.get("bin_step")
-    if bin_step in (None, "", 0):
-        return False, "bin_step unknown (fail-closed)"
-    try:
-        bin_step = int(bin_step)
-    except (TypeError, ValueError):
-        return False, "bin_step malformed"
-    allowed = ALLOWED_METEORA_BIN_STEPS
-    if bin_step not in allowed:
-        return False, f"bin_step {bin_step} not in allowed set {sorted(allowed)} (George rail)"
+    # One shared predicate (owner ruling 2026-10-19): >= 4 and <= 400.
+    # The historical whitelist membership test is gone; `allowed_bin_steps`
+    # is retained only as an optional extra restriction for legacy callers.
+    ok, reason = meteora_bin_step_allowed(pool.get("bin_step"))
+    if not ok:
+        return False, f"{reason} (George rail)"
+    if allowed_bin_steps:
+        try:
+            step = int(pool.get("bin_step"))
+        except (TypeError, ValueError):
+            return False, "bin_step malformed (fail-closed)"
+        if step not in allowed_bin_steps:
+            return False, (f"bin_step {step} not in caller-restricted set "
+                           f"{sorted(allowed_bin_steps)} (George rail)")
     return True, ""
 
 
@@ -209,25 +215,13 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
 
         # Bin step check: only enforced for Meteora DLMM pools.
         # Raydium CLMM and Orca Whirlpool use tick_spacing, not bin steps.
+        # Delegated to strategy/bin_step_rail.py — the single implementation
+        # (owner ruling 2026-10-19: any step >= 4, <= 400).
         if dex == "meteora":
-            bin_step = pool.get("bin_step")
-            if bin_step in (None, "", 0):
-                # Fail-closed: unknown/missing bin_step drops the candidate
-                skipped.append({**base,
-                                "reason": f"bin_step {bin_step} not in allowed set "
-                                f"{sorted(allowed_bin_steps)} (George rail)"})
-                continue
-            try:
-                if int(bin_step) not in allowed_bin_steps:
-                    skipped.append({**base,
-                                    "reason": f"bin_step {bin_step} not in allowed set "
-                                    f"{sorted(allowed_bin_steps)} (George rail)"})
-                    continue
-            except (ValueError, TypeError):
-                # Malformed bin_step (e.g. 'junk') fails closed
-                skipped.append({**base,
-                                "reason": f"bin_step {bin_step} not in allowed set "
-                                f"{sorted(allowed_bin_steps)} (George rail)"})
+            _ok, _why = _meteora_bin_step_allowed(pool, dex,
+                                                 allowed_bin_steps)
+            if not _ok:
+                skipped.append({**base, "reason": _why})
                 continue
         # Dual-model scoring gate: require cross-model agreement or a weighted
         # combination when the fee-capture model (new_fc) produced a score.

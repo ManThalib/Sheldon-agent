@@ -13,6 +13,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from run_cycle.close_settlement import (
+    classify_submission_state,
     advance,
     derive_rejected_statuses,
     check_settlement,
@@ -37,10 +38,26 @@ def _entry(**kw):
 
 
 class ClassificationTests(unittest.TestCase):
-    def test_retryable_causes(self):
-        for reason in ("slippage exceeded", "RPC timeout", "rate limit hit",
-                       "insufficient funds for fees"):
+    def test_pre_submission_causes_are_retryable(self):
+        # Owner ruling 2026-10-19: only provably pre-submission failures may
+        # be retried. These all fail before a transaction could be sent.
+        for reason in ("slippage exceeded", "SOLANA_AGENT_WALLET not set",
+                       "signal validation failed", "insufficient funds for fees",
+                       "preflight: INSUFFICIENT_SOL_FOR_OPEN"):
+            self.assertEqual(classify_submission_state(reason),
+                             "pre_submission", reason)
             self.assertEqual(classify_rejection(reason), "retryable", reason)
+
+    def test_ambiguous_causes_are_never_retryable(self):
+        # A timeout/RPC/blockhash failure may have landed. Retrying it could
+        # close an already-closed position, so it stays in review even when
+        # the position is still visible in a fresh scan.
+        for reason in ("RPC timeout", "rate limit hit", "blockhash not found",
+                       "network error", "fetch failed", "429",
+                       "transaction expired"):
+            self.assertEqual(classify_submission_state(reason),
+                             "ambiguous", reason)
+            self.assertEqual(classify_rejection(reason), "review", reason)
 
     def test_unknown_causes_require_review(self):
         for reason in ("", None, "position not found", "unknown error",

@@ -129,18 +129,38 @@ class MatrixSheldonTests(unittest.TestCase):
         # George journals failed_verify when the chain verify block says the
         # close did not land. The fold must treat it as a rejection, and the
         # re-derivation must produce an actionable status, not silence.
+        #
+        # Owner ruling 2026-10-19: "RPC timeout" is AMBIGUOUS — the send may
+        # have landed — so it must land in review, never in retry. This case
+        # previously asserted CLOSE_RETRY_ALLOWED, which encoded the unsafe
+        # behaviour the ruling removed.
         self.assertIn("failed_verify", {"rejected", "failed", "failed_verify"})
         state = {"s1": emitted_entry()}
         entries = {"s1": {"status": "failed_verify",
                           "pool_address": "P1", "timestamp": NOW - 60,
                           "reason": "RPC timeout"}}
-        position_presence = {"P1": True}   # position still there -> retryable
+        position_presence = {"P1": True}
         update_from_journal(state, entries, position_presence, True)
-        derive_rejected_statuses(state, position_presence, True)
-        self.assertEqual(state["s1"]["status"], "CLOSE_RETRY_ALLOWED")
+        derive_rejected_statuses(state, position_presence, True, now=NOW)
+        self.assertEqual(state["s1"]["status"], "CLOSE_REVIEW_REQUIRED")
+        self.assertEqual(state["s1"]["submission_state"], "ambiguous")
         blocking, review = summarize(state)
         self.assertTrue(any("s1" in b for b in blocking))
-        self.assertFalse(any(r["signal_id"] == "s1" for r in review))
+        self.assertTrue(any(r["signal_id"] == "s1" for r in review))
+
+    def test_case08c_verify_failed_presubmission_is_retryable(self):
+        # A failure that provably never reached the send path, with the
+        # position still present in a fresh scan, may be retried.
+        state = {"s1": emitted_entry()}
+        entries = {"s1": {"status": "failed",
+                          "pool_address": "P1",
+                          "confirmed_at": NOW - 3600,
+                          "reason": "SOLANA_AGENT_WALLET not set"}}
+        position_presence = {"P1": True}
+        update_from_journal(state, entries, position_presence, True)
+        derive_rejected_statuses(state, position_presence, True, now=NOW)
+        self.assertEqual(state["s1"]["status"], "CLOSE_RETRY_ALLOWED")
+        self.assertEqual(state["s1"]["submission_state"], "pre_submission")
 
     def test_case08b_verify_failed_position_absent_needs_review(self):
         state = {"s1": emitted_entry()}

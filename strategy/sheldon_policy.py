@@ -10,6 +10,12 @@ import json
 import os
 from typing import Any, Dict, Set
 
+from strategy.bin_step_rail import (
+    allowed_bin_step_set,
+    meteora_bin_step_allowed,
+    normalize_rule,
+)
+
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHELDON_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +46,13 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["min_open_score"] = float(scoring.get("min_open_score") or 70.0)
 
     pool = data.get("pool_eligibility") or {}
-    policy["allowed_bin_steps"] = set(pool.get("allowed_bin_steps", [10, 20, 25, 50, 100]))
+    # bin_step is a RULE, not a list (owner ruling 2026-10-19): every Meteora
+    # step >= 4 is allowed, > 400 is protocol-invalid. `bin_step_rule` is the
+    # configured shape; a legacy `allowed_bin_steps` list is accepted only as
+    # an envelope so old manifests cannot silently re-narrow the rail.
+    policy["bin_step_rule"] = normalize_rule(
+        pool.get("bin_step_rule", pool.get("allowed_bin_steps")))
+    policy["allowed_bin_steps"] = allowed_bin_step_set(policy["bin_step_rule"])
     # Deprecated: the following gates are now owned by Missy. Kept only as
     # fallback when scanning older Missy outputs that lack `eligible`.
     policy["min_pool_liquidity_usd"] = float(pool.get("min_pool_liquidity_usd", 25000.0))
@@ -101,11 +113,11 @@ MIN_POSITION_USD: float = _POLICY["min_position_usd"]
 DEFAULT_MAX_POSITION_USD: float = _POLICY["default_max_position_usd"]
 MAX_POSITION_OPEN_PER_CYCLE: int = _POLICY["max_opens_per_cycle"]
 
-# Mirror of George's SAFETY_RAILS.md `allowed_bin_steps`. A Meteora pool
-# whose bin_step is not in this list must never emit an OPEN signal: George
-# hard-rejects it at the executor, so the open would just burn a cycle (and
-# near-1-bp pools earn nothing worth the round trip).
-ALLOWED_METEORA_BIN_STEPS: Set[int] = _POLICY["allowed_bin_steps"]
+# Single source: strategy/bin_step_rail.py (owner ruling 2026-10-19).
+# Derived from the same rule the predicate uses, so this set can never
+# disagree with meteora_bin_step_allowed().
+METEORA_BIN_STEP_RULE: dict = _POLICY["bin_step_rule"]
+ALLOWED_METEORA_BIN_STEPS: frozenset = _POLICY["allowed_bin_steps"]
 
 SCORING_SOURCE: str = _POLICY["scoring_source"]
 SCORING_VERSION: int = _POLICY["scoring_version"]

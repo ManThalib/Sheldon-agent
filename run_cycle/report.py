@@ -38,7 +38,7 @@ def append_log(report: dict, memory_dir: str, signals_created: list, review: lis
         f"## Cycle — {_utc_iso()}",
         f"- sources: pools={report.get('sources', {}).get('pools')} positions={report.get('sources', {}).get('positions')} wallet={report.get('sources', {}).get('wallet_scan')}",
         f"- verdicts: {len(report.get('verdicts', []))}",
-        f"- capital: idle={wallet.get('idle_usdc', 0.0):.2f} dust={wallet.get('dust_total_usdc', 0.0):.2f} deployable={wallet.get('deployable_usdc', 0.0):.2f}",
+        f"- capital: idle={wallet.get('idle_usdc', 0.0):.2f} dust={wallet.get('dust_total_usdc', 0.0):.2f} deployable={wallet.get('deployable_usdc', 0.0):.2f} liquidation_required={wallet.get('liquidation_required_usd', 0.0):.2f}",
         f"- plan: suggested_position={capital.get('suggested_position_usdc', 0.0):.2f} open_eligible={capital.get('open_eligible', False)}",
     ]
     if funding:
@@ -104,6 +104,7 @@ def _short_summary(report: dict, review: list = None) -> str:
     if wallet:
         parts.append(f"idle={wallet.get('idle_usdc', 0.0):.2f}")
         parts.append(f"dust={wallet.get('dust_total_usdc', 0.0):.2f}")
+        parts.append(f"deployable={wallet.get('deployable_usdc', 0.0):.2f}")
     if capital:
         parts.append(f"suggested={capital.get('suggested_position_usdc', 0.0):.2f}")
         parts.append(f"eligible={capital.get('open_eligible', False)}")
@@ -125,6 +126,13 @@ def _wake_george(signals_created: list, review: list, signals_dir: str = None):
     doorbell automation for a signal George's queue did not contain).
     """
     if not signals_created:
+        return
+    # Zero-token pipeline runs execute the dispatcher inline; ringing the
+    # doorbell would fire an agentTurn automation (a model call) per cycle.
+    # SHELDON_DOORBELL=0 disables it; default keeps the interactive behavior.
+    if os.environ.get("SHELDON_DOORBELL", "1").strip() == "0":
+        print("WAKE_GEORGE skipped: SHELDON_DOORBELL=0 (inline dispatcher)",
+              file=sys.stderr)
         return
     if signals_dir is not None:
         live_dir = os.path.abspath(DEFAULT_SIGNALS_DIR)

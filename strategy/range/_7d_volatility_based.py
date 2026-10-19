@@ -11,6 +11,7 @@ Mechanical limits are loaded from George's execution_limits.json.
 import math
 from typing import Any, Dict, Optional, Set
 
+from strategy.bin_step_rail import meteora_bin_step_allowed as _rail_step_allowed
 from strategy.sheldon_policy import (
     WIDTH_FACTOR,
     MIN_HALF_WIDTH,
@@ -51,11 +52,9 @@ def meteora_bin_step_allowed(pool: Dict[str, Any], dex: str = None) -> tuple:
         bin_step = int(bin_step)
     except (TypeError, ValueError):
         return False, "bin_step malformed"
-    if bin_step not in ALLOWED_METEORA_BIN_STEPS:
-        return False, (
-            f"bin_step {bin_step} not in allowed set {sorted(ALLOWED_METEORA_BIN_STEPS)} "
-            "(George rail: allowed_bin_steps)"
-        )
+    ok, reason = _rail_step_allowed(bin_step)
+    if not ok:
+        return False, f"{reason} (George rail)"
     return True, ""
 
 

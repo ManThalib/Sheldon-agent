@@ -343,10 +343,14 @@ def _empty_wallet(reason: str) -> dict:
         "wallet": None,
         "total_usd": 0.0,
         "idle_usdc": 0.0,
+        "idle_stable_usd": 0.0,
         "dust_total_usdc": 0.0,
         "dust_assets": [],
+        "stable_assets": [],
+        "liquidation_required_usd": 0.0,
         "reserved_total_usdc": 0.0,
         "deployable_usdc": 0.0,
+        "deployable_stable_usd": 0.0,
         "errors": [reason],
         "source": None,
     }
@@ -1201,6 +1205,21 @@ def _score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
 # --------------------------------------------------------------------------
 # Main cycle
 # --------------------------------------------------------------------------
+def filter_live_positions(positions):
+    """Drop settlement history from a position scan.
+
+    Missy's history scan appends positions it has seen before, including ones
+    that are already closed, tagged ``status="closed"``. Scoring those rows
+    produced CLOSE verdicts for positions that no longer exist on chain, and
+    George then failed them with "Position not found" (2026-10-18: 10 of 12
+    emitted signals were ghosts). Only live rows may reach scoring.
+    """
+    if not isinstance(positions, list):
+        return []
+    return [p for p in positions
+            if isinstance(p, dict) and p.get("status") != "closed"]
+
+
 def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
               max_age_seconds: float = 3900.0) -> dict:
     cfg = get_config()
@@ -1234,6 +1253,12 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
         pos_data = load_json(pos_path)
         positions = (pos_data.get("positions", []) if isinstance(pos_data, dict)
                      else pos_data if isinstance(pos_data, list) else [])
+        # Closed positions are settlement history, not holdings. Missy's Helius
+        # history scan appends them with status="closed"; scoring them produced
+        # CLOSE/REBALANCE verdicts for positions that no longer exist on chain
+        # (observed 2026-10-18: 10 of 12 signals failed in George with
+        # "Position not found").
+        positions = filter_live_positions(positions)
     if report["failures"]:
         return report
 

@@ -18,7 +18,21 @@ RESERVED_MINTS: set = {
     SOL_MINT
 }
 
-# Dust rule: non-SOL, non-USDC, value above this threshold.
+# Stablecoins that are spendable as quote liquidity without a swap.
+# ONLY mints listed here may contribute to ``deployable_usdc``. This is a
+# deliberate allow-list, not a deny-list: a volatile asset (WBTC, JUP, mSOL,
+# an unknown mint) must never inflate deployable capital, because that money
+# cannot be spent until it is swapped, and the swap can fail, slip, or be
+# rejected by the funding gate. Dust assets already drive a separate
+# dust-swap signal; counting them here as well double-counted the same USD.
+#
+# USDC is the settlement mint for every open. Add another stable only after
+# verifying its mint address and that the executor can quote it.
+STABLE_MINTS: set = {
+    USDC_MINT,
+}
+
+# Dust rule: non-SOL, non-stable, value above this threshold.
 DUST_MIN_USD = 1.0
 
 # SOL reserve: lamports that are never spent (rent + ATA + fees floor).
@@ -37,19 +51,34 @@ def _is_sol_asset(asset: Dict[str, Any]) -> bool:
 def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
     """Build a capital summary from a Missy wallet scan.
 
+    Capital is split by *spendability*, not by size:
+
+    - ``idle_usdc`` / ``deployable_stable_usd`` — stablecoins from
+      ``STABLE_MINTS``. This is the only capital that can fund an open
+      without a swap, so it is the only capital counted as deployable.
+    - ``liquidation_required_usd`` — volatile assets above ``DUST_MIN_USD``.
+      Real value, but it must be sold before it can be spent; it drives a
+      dust-swap signal instead of being counted as deployable.
+    - ``deployable_sol_usd`` — SOL surplus above the rent/fee reserve.
+
     Returns:
         {
             "wallet": <pubkey or None>,
             "total_usd": <scan total>,
-            "idle_usdc": <USDC value_usd>,
+            "idle_usdc": <USDC-mint value>,
+            "idle_stable_usd": <all stablecoin value>,
             "idle_sol_raw_lamports": <raw lamports of idle SOL>,
             "idle_sol_usd": <USD value of idle SOL>,
-            "dust_total_usdc": <sum of dust values>,
-            "reserved_total_usdc": <value of reserved/non-dust non-USDC>,
-            "deployable_usdc": idle_usdc + dust_total_usdc,       # unchanged: USD only
+            "stable_assets": [...],
+            "dust_assets": <volatile assets above the dust floor>,
+            "dust_total_usdc": <volatile total; NOT spendable>,
+            "liquidation_required_usd": <same as dust_total_usdc>,
+            "reserved_total_usdc": <value of reserved/non-dust non-stable>,
+            "deployable_usdc": idle_stable_usd,   # stablecoins only
+            "deployable_stable_usd": idle_stable_usd,
             "deployable_sol_raw_lamports": <excess SOL lamports after reserve>,
             "deployable_sol_usd": <excess SOL USD after reserve>,
-            "deployable_total_usd": <total deployable including SOL>,
+            "deployable_total_usd": <stable + deployable SOL, no dust>,
             "errors": []
         }
     """
@@ -58,8 +87,10 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
     total_usd = float(data.get("total_usd") or 0.0)
 
     idle_usdc = 0.0
+    idle_stable_usd = 0.0
     idle_sol_raw_lamports = 0  # raw lamports, summed from SOL assets
     idle_sol_usd = 0.0  # USD value of idle SOL
+    stable_assets: List[Dict[str, Any]] = []
     dust_assets: List[Dict[str, Any]] = []
     reserved_total = 0.0
 
@@ -68,8 +99,15 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
         value = float(asset.get("total_value_usd") or 0.0)
         is_native_sol = bool(asset.get("is_native_sol"))
 
-        if mint == USDC_MINT:
-            idle_usdc += value
+        if mint in STABLE_MINTS:
+            idle_stable_usd += value
+            if mint == USDC_MINT:
+                idle_usdc += value
+            stable_assets.append({
+                "mint": mint,
+                "symbol": asset.get("symbol") or "",
+                "value_usd": value,
+            })
             continue
 
         if _is_sol_asset(asset):
@@ -111,7 +149,9 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
             break
     deployable_sol_usd = idle_sol_usd - (SOL_RESERVE_LAMPORTS / 1e9) * sol_price
     deployable_sol_usd = max(0.0, deployable_sol_usd)  # cannot be negative
-    deployable_total_usd = idle_usdc + dust_total + deployable_sol_usd
+    # Deployable USD excludes volatile dust by construction: only stablecoins
+    # and SOL surplus are spendable without a swap.
+    deployable_total_usd = idle_stable_usd + deployable_sol_usd
 
     # Wallet capital summary and multi-wallet tag.
     wallet_id = (data.get("wallet_id") or "main").strip() or "main"
@@ -120,12 +160,16 @@ def summarize_wallet(data: Dict[str, Any]) -> Dict[str, Any]:
         "wallet_id": wallet_id,
         "total_usd": total_usd,
         "idle_usdc": idle_usdc,
+        "idle_stable_usd": idle_stable_usd,
         "idle_sol_raw_lamports": idle_sol_raw_lamports,
         "idle_sol_usd": idle_sol_usd,
+        "stable_assets": stable_assets,
         "dust_total_usdc": dust_total,
         "dust_assets": dust_assets,
+        "liquidation_required_usd": dust_total,
         "reserved_total_usdc": reserved_total,
-        "deployable_usdc": idle_usdc + dust_total,       # unchanged: USD only
+        "deployable_usdc": idle_stable_usd,   # stablecoins only
+        "deployable_stable_usd": idle_stable_usd,
         "deployable_sol_raw_lamports": deployable_sol_raw_lamports,
         "deployable_sol_usd": deployable_sol_usd,
         "deployable_total_usd": deployable_total_usd,

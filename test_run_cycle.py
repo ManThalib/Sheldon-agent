@@ -269,15 +269,43 @@ class OpenCandidateFilterTests(unittest.TestCase):
         self.assertEqual(kept, [])
         self.assertIn("legacy policy", skipped[0]["reason"])
 
-    def test_meteora_bin_step_125_is_dropped(self):
-        # 125 is not in the allowed_bin_steps whitelist.
-        kept, skipped = _filter_open_candidates(
+    def test_meteora_bin_step_125_is_kept_after_owner_ruling(self):
+        # Owner ruling 2026-10-19: any Meteora bin_step >= 4 is allowed.
+        # This test previously asserted 125 was dropped by the whitelist.
+        kept, _ = _filter_open_candidates(
             [self._candidate("P1", dex="meteora",
                              pool={"active_bin_id": -5333, "bin_step": 125})],
             {},
         )
+        self.assertEqual(len(kept), 1)
+
+    def test_meteora_bin_step_below_owner_minimum_is_dropped(self):
+        for step in (1, 2, 3):
+            kept, skipped = _filter_open_candidates(
+                [self._candidate("P1", dex="meteora",
+                                 pool={"active_bin_id": -5333,
+                                       "bin_step": step})],
+                {},
+            )
+            self.assertEqual(kept, [], f"bin_step {step} must be rejected")
+            self.assertIn("below owner minimum", skipped[0]["reason"])
+
+    def test_meteora_bin_step_above_protocol_max_is_dropped(self):
+        kept, skipped = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": 401})],
+            {},
+        )
         self.assertEqual(kept, [])
-        self.assertIn("bin_step 125", skipped[0]["reason"])
+        self.assertIn("protocol maximum", skipped[0]["reason"])
+
+    def test_meteora_bin_step_400_is_kept(self):
+        kept, _ = _filter_open_candidates(
+            [self._candidate("P1", dex="meteora",
+                             pool={"active_bin_id": -5333, "bin_step": 400})],
+            {},
+        )
+        self.assertEqual(len(kept), 1)
 
     def test_meteora_bin_step_10_is_kept(self):
         kept, _ = _filter_open_candidates(
@@ -329,15 +357,16 @@ class OpenCandidateFilterTests(unittest.TestCase):
         verdict = self._candidate("P1", dex="meteora",
                                   pool={"pool_address": "P1",
                                         "active_bin_id": -100,
-                                        "bin_step": 125,
+                                        "bin_step": 3,
                                         "token_x_decimals": 9,
                                         "token_y_decimals": 6,
                                         "token_x_price_usd": 120.0,
                                         "token_y_price_usd": 1.0})
-        # Candidate must pass the filter first; bin_step 125 is dropped.
+        # Candidate must pass the filter first; bin_step 3 is below the
+        # owner minimum and is dropped.
         kept, skipped = _filter_open_candidates([verdict], {})
         self.assertEqual(kept, [])
-        self.assertIn("bin_step 125", skipped[0]["reason"])
+        self.assertIn("below owner minimum", skipped[0]["reason"])
 
 
 class WalletCapitalTests(unittest.TestCase):
@@ -364,7 +393,9 @@ class WalletCapitalTests(unittest.TestCase):
         self.assertEqual(summary["idle_usdc"], 15.0)
         self.assertEqual(summary["dust_total_usdc"], 4.0)
         self.assertEqual(summary["reserved_total_usdc"], 1.2)
-        self.assertEqual(summary["deployable_usdc"], 19.0)
+        # Volatile dust is NOT deployable: it must be swapped first.
+        self.assertEqual(summary["deployable_usdc"], 15.0)
+        self.assertEqual(summary["liquidation_required_usd"], 4.0)
         self.assertEqual(len(summary["dust_assets"]), 1)
         self.assertEqual(summary["dust_assets"][0]["mint"], "DUSTMINT")
 
@@ -767,7 +798,9 @@ class RunCycleIntegrationTests(unittest.TestCase):
         self.assertIn("wallet", report)
         self.assertEqual(report["wallet"]["idle_usdc"], 100.0)
         self.assertEqual(report["wallet"]["dust_total_usdc"], 20.0)
-        self.assertEqual(report["wallet"]["deployable_usdc"], 120.0)
+        # 20.0 of volatile dust is not deployable; only the 100 USDC is.
+        self.assertEqual(report["wallet"]["deployable_usdc"], 100.0)
+        # 75% of 100 = 75, idle > 20 => eligible.
         # 75% of deployable = 90, idle > 20 => eligible.
 
     def _write_signals_with_funding(self, wallet_scan, signals_dir, report=None):
@@ -858,14 +891,22 @@ class RunCycleIntegrationTests(unittest.TestCase):
         created, review = self._write_signals_with_funding(None, signals_dir)
 
         actions = []
+        prep_for = []
         for path in created:
             with open(path, "r", encoding="utf-8") as fh:
                 signal = json.load(fh)
             actions.append(signal["action"])
+            if signal["action"] == "swap":
+                prep_for.append(signal.get("prep_for_pool"))
 
         self.assertIn("swap_to_usdc", actions)
         self.assertIn("open", actions)
-        self.assertNotIn("swap", actions)  # funded: no prep swap needed
+        # Funded from existing balances: no prep swap FOR THIS POOL. A
+        # pool-agnostic surplus sell (prep_for_pool is None) is the separate
+        # "dead capital" rebalance and is allowed — at the corrected,
+        # smaller size it leaves ~$7.86 of SOL above the reserve, which
+        # crosses SELL_SURPLUS_MIN_USD ($2).
+        self.assertNotIn("p2", prep_for)
         self.assertEqual(actions.count("swap_to_usdc"), 1)
 
     def test_dust_sweep_skips_recent_prep_buy(self):

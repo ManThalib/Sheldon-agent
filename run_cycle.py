@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import lp_scoring
 import range_state
@@ -37,6 +37,56 @@ from readiness import (
 )
 from readiness.prep_ledger import read_journal
 import dynamic
+import datetime
+
+def _get_manual_close_state(signals_dir: str) -> Dict[str, Dict[str, Any]]:
+    """Return a close_state-like dict from executed close signals in signals/processed/.
+    Each entry has status CLOSE_RESOLVED and confirmed_at set to the signal's created_at.
+    """
+    processed_dir = Path(signals_dir) / "processed"
+    if not processed_dir.is_dir():
+        return {}
+    manual_state: Dict[str, Dict[str, Any]] = {}
+    for path in processed_dir.iterdir():
+        if not path.is_file() or not path.name.endswith(".json"):
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                sig = json.load(fh)
+        except Exception:
+            continue
+        if sig.get("action") != "close":
+            continue
+        if sig.get("decision") != "executed":
+            continue
+        signal_id = sig.get("signal_id")
+        if not signal_id:
+            continue
+        created = sig.get("created_at")
+        if not created:
+            continue
+        try:
+            # Remove trailing Z and convert
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            ts = dt.timestamp()
+        except Exception:
+            continue
+        pool = sig.get("pool_address")
+        if not pool:
+            continue
+        entry = {
+            "status": "CLOSE_RESOLVED",
+            "confirmed_at": created,
+            "resolved_at": created,
+            "funds_verified_at": created,
+            "chain_verified_at": created,
+            "pool_address": pool,
+            "signal_id": signal_id,
+        }
+        manual_state[signal_id] = entry
+    return manual_state
+
+from strategy.bin_step_rail import allowed_bin_step_set
 from strategy import (
     MIN_POSITION_USD,
     build_strategies,
@@ -124,9 +174,51 @@ from run_cycle.close_settlement import (  # noqa: E402
 
 
 
+def _agent_mode() -> str:
+    """Executor mode, as exported by the driver after the shared config gate.
+
+    Deliberately reports ``"unknown"`` when unset rather than assuming
+    ``dry_run``: chain-truth reconciliation must never turn itself on because
+    an environment variable was forgotten.
+    """
+    return (os.environ.get("PIPELINE_AGENT_MODE") or "unknown").strip()
+
+
+def _pending_close_positions(signals_dir: str) -> set:
+    """Position ids whose close signal is still queued (in flight).
+
+    An in-flight close must never be resolved on chain absence: the position
+    may be gone because the close landed, but the queue entry still needs the
+    executor's journal verdict. Returns an empty set when the directory is
+    unreadable — which, combined with the mode check, keeps reconciliation
+    conservative (it can only ever resolve less).
+    """
+    pending = set()
+    try:
+        names = os.listdir(signals_dir)
+    except OSError:
+        return pending
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(signals_dir, name),
+                      encoding="utf-8") as fh:
+                sig = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(sig, dict):
+            continue
+        if sig.get("action") not in ("close", "rebalance", "rotate"):
+            continue
+        pid = sig.get("position_id")
+        if pid:
+            pending.add(str(pid))
+    return pending
+
+
 def resolve_close_entry(state_dir: str, signal_id: str, note: str = "") -> int:
     """Mark one close-settlement entry CLOSE_RESOLVED (manual:true).
-
     Owner-approved 2026-10-10 (plan question #19): supersedes the
     edit-the-JSON-only design. Returns a process exit code.
     """
@@ -446,6 +538,10 @@ def main() -> int:
 
     open_candidates = [v for v in report.get("verdicts", [])
                        if v.get("action") == "OPEN_CANDIDATE"]
+    # Augment close_state with manually executed close signals for cooldown.
+    manual_state = _get_manual_close_state(args.signals_dir)
+    if manual_state:
+        close_state.update(manual_state)
     kept_candidates, open_skipped = _filter_open_candidates(
         open_candidates, active_positions,
         policy_windows={
@@ -456,7 +552,7 @@ def main() -> int:
         min_score=_POLICY.get("min_open_score", 70.0),
         min_liquidity=_POLICY.get("min_pool_liquidity_usd", 25000.0),
         min_volume=_POLICY.get("min_24h_volume_usd", 5000.0),
-        allowed_bin_steps=_POLICY.get("allowed_bin_steps", {4, 10, 20, 25, 50, 100}),
+        allowed_bin_steps=_POLICY.get("allowed_bin_steps", allowed_bin_step_set()),
         reserved_pools=pending_targets,
         cooldown_pools=close_cooldown_pools(
             close_state, now=now_ts,
@@ -522,6 +618,9 @@ def main() -> int:
         active_positions, wallet_mtime, position_mtime, close_state,
         now=time.time(), policy=rotation_policy,
         max_scan_age_seconds=max_position_scan_age,
+        mode=_agent_mode(),
+        chain_rpc_url=os.environ.get("SHELDON_CHAIN_RPC_URL") or None,
+        pending_position_ids=_pending_close_positions(args.signals_dir),
     )
     # Propagate updated close state
     _save_close_state(args.state_dir, updated_state)
@@ -715,7 +814,10 @@ def main() -> int:
     # notify George immediately when actionable signals were written.
     if signals_created:
         summary = ", ".join(Path(p).name for p in signals_created)
-        print(f"WAKE_GEORGE: {len(signals_created)} signal(s) -> {summary}")
+        # stderr: --json writes the report to stdout, and a banner line here
+        # corrupted the sheldon_report-*.json artifact.
+        print(f"WAKE_GEORGE: {len(signals_created)} signal(s) -> {summary}",
+              file=sys.stderr)
 
     _save_rotation_state(args.state_dir, rot_state)
 

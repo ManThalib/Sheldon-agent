@@ -35,16 +35,13 @@
     ]
   },
   "pool_eligibility": {
-    "_comment_deprecated": "Missy now owns min_pool_liquidity_usd, min_24h_volume_usd, min_fee_tvl_ratio, max_volatility_pct, max_turnover_ratio. Sheldon keeps allowed_bin_steps, min_open_score, windows, sizing, add/remove policy.",
+    "_comment_deprecated": "Missy now owns min_pool_liquidity_usd, min_24h_volume_usd, min_fee_tvl_ratio, max_volatility_pct, max_turnover_ratio. Sheldon keeps bin_step_rule, min_open_score, windows, sizing, add/remove policy.",
     "min_open_score": 70.0,
-    "allowed_bin_steps": [
-      4,
-      10,
-      20,
-      25,
-      50,
-      100
-    ]
+    "bin_step_rule": {
+      "min": 4,
+      "max": 400,
+      "_comment": "Owner ruling 2026-10-19: any Meteora bin_step >= 4 allowed; 401+ is protocol-invalid (>400). Reject 1,2,3 and fail closed on missing/0/malformed."
+    }
   },
   "position_sizing": {
     "min_position_usd": 20,
@@ -105,15 +102,10 @@
     "require_position_scan_confirmation": true,
     "require_wallet_capital_confirmation": true,
     "require_token_readiness": true,
-    "require_sol_readiness": true
+    "require_sol_readiness": true,
+    "dry_run_chain_truth_reconciliation": true,
+    "_dry_run_chain_truth_comment": "Owner-approved 2026-10-19. dry_run only: resolve a close that was emitted but never executed when the position account is provably absent at confirmed AND finalized while its pool account still resolves. Live modes ignore this flag entirely - the journal ladder is the sole authority there."
   },
-  "allowed_bin_steps": [
-    10,
-    20,
-    25,
-    50,
-    100
-  ],
   "range": {
     "_comment": "Volatility-adaptive range width (strategy/range). width_factor: cover +/- volatility*width_factor per side. min_half_width: absolute floor in bins (Meteora) / raw 1bp ticks (Orca, Raydium). min_half_fraction: floor as a price fraction per side (0.01 = +/-1%) so the floor means the same price width on every DEX/tick-spacing; added 2026-10-14 after the Czfq3xZZ SOL-USDC incident where the tick-count floor let a ts=4 Whirlpool open at +/-0.1% and hit its edge in 45 minutes.",
     "width_factor": 0.5,

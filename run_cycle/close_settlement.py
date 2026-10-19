@@ -79,25 +79,90 @@ UNKNOWN_TTL_SECONDS = 7 * 24 * 3600
 
 # Journal reason fragments classified as retryable. Anything else (including
 # an empty or unknown reason) requires review — fail closed.
-RETRYABLE_REASON_PATTERNS = (
+# Reasons that prove the transaction was never submitted. A retry may only be
+# emitted for these (owner ruling 2026-10-19: "retry only when the failure is
+# classifiably pre-submission — definitely never submitted").
+PRE_SUBMISSION_PATTERNS = (
+    "not set",
+    "not configured",
+    "missing env",
+    "no signer",
+    "signer",
+    "wallet not",
+    "validation",
+    "invalid signal",
+    "unsupported",
+    "refused",
+    "refusing",
+    "preflight",
+    "insufficient sol",
+    "insufficient balance",
+    "insufficient funds",
     "slippage",
     "price impact",
     "price_impact",
-    "insufficient funds",
-    "insufficient sol",
-    "insufficient balance",
+    "transaction simulation",
+    "simulation failed",
+    "bin_step",
+    "outside allowed range",
+    "below owner minimum",
+)
+
+# Reasons where the transaction MAY already have been submitted. These used to
+# be classified retryable, which is the defect: a timeout after a send can be
+# a landed close, and retrying it would close an already-closed position.
+AMBIGUOUS_SUBMISSION_PATTERNS = (
     "timeout",
     "timed out",
-    "expired",
     "blockhash",
+    "expired",
     "network",
     "rpc",
     "rate limit",
     "rate_limit",
     "429",
-    "transaction simulation",
-    "retry",
+    "fetch failed",
+    "connection",
+    "econnreset",
+    "socket",
+    "unknown",
+    "internal error",
+    "already processed",
+    "block height exceeded",
 )
+
+# Anti-churn delay for a retry; never evidence of safety on its own.
+RETRY_COOLDOWN_SECONDS = 900.0
+
+
+def classify_submission_state(reason: str) -> str:
+    """Classify a rejection by whether the send could have happened.
+
+    Returns ``pre_submission`` (definitely never submitted),
+    ``ambiguous`` (may have been submitted) or ``unknown``. Only
+    ``pre_submission`` is retryable.
+    """
+    lowered = (reason or "").lower()
+    if not lowered:
+        return "unknown"
+    for pattern in PRE_SUBMISSION_PATTERNS:
+        if pattern in lowered:
+            return "pre_submission"
+    for pattern in AMBIGUOUS_SUBMISSION_PATTERNS:
+        if pattern in lowered:
+            return "ambiguous"
+    return "unknown"
+
+
+def classify_rejection(reason: str) -> str:
+    """Classify a rejected close cause as ``retryable`` or ``review``.
+
+    Retryable means *provably pre-submission*. Ambiguous and unknown causes
+    are never retryable: an ambiguous failure stays in review regardless of
+    what the position scan shows, because the close may have landed.
+    """
+    return ("retryable" if classify_submission_state(reason) == "pre_submission"
+            else "review")
 
 
 def _close_state_path(state_dir: str) -> str:
@@ -144,21 +209,6 @@ def save_close_state(state_dir: str, state: dict) -> None:
         pass
 
 
-def classify_rejection(reason: str) -> str:
-    """Classify a rejected close cause as ``retryable`` or ``review``.
-
-    Unknown, empty or unparseable causes classify as review: we never retry
-    a close we do not understand.
-    """
-    lowered = (reason or "").lower()
-    if not lowered:
-        return "review"
-    for pattern in RETRYABLE_REASON_PATTERNS:
-        if pattern in lowered:
-            return "retryable"
-    return "review"
-
-
 def mark_emitted(state: Dict[str, Dict[str, Any]], signal_id: str,
                  pool_address: Optional[str], now_ts: float = None,
                  action: str = "close", position_id: str = None) -> None:
@@ -196,7 +246,9 @@ def mark_emitted(state: Dict[str, Dict[str, Any]], signal_id: str,
 def _derive_rejected_status(entry: Dict[str, Any],
                             position_present: Optional[bool],
                             position_scan_current: bool,
-                            pool_settled_before: bool) -> str:
+                            pool_settled_before: bool,
+                            retry_ready: bool = False,
+                            ) -> str:
     """Re-derive the actionable status of a rejected close.
 
     order matters:
@@ -205,16 +257,26 @@ def _derive_rejected_status(entry: Dict[str, Any],
          scan refresh: resolve it;
       2. position absent from a current scan — ambiguous (the close may
          have landed despite the failure): review;
-      3. position still present + retryable cause + fresh evidence —
-         a retry with a new signal id is allowed;
+      3. position still present + provably pre-submission failure + fresh
+         evidence + retry cooldown elapsed: retry with a new signal id;
       4. anything else — review.
+
+    Owner ruling 2026-10-19: retry requires proof the transaction was never
+    submitted. An ambiguous cause (timeout, RPC/network, blockhash expiry)
+    is NOT retryable regardless of what the scan shows, because the close
+    may already have landed. ``retry_ready`` only encodes the anti-churn
+    cooldown; it never authorises a retry on its own.
     """
+    submission_state = classify_submission_state(entry.get("reason") or "")
+    entry["submission_state"] = submission_state
     if pool_settled_before:
         return "CLOSE_RESOLVED"
     if position_present is False and position_scan_current:
         return "CLOSE_REVIEW_REQUIRED"
-    if (position_present is True and position_scan_current
-            and classify_rejection(entry.get("reason") or "") == "retryable"):
+    if submission_state != "pre_submission":
+        # Ambiguous or unknown: may have been submitted. Stay in review.
+        return "CLOSE_REVIEW_REQUIRED"
+    if position_present is True and position_scan_current and retry_ready:
         return "CLOSE_RETRY_ALLOWED"
     return "CLOSE_REVIEW_REQUIRED"
 
@@ -281,6 +343,8 @@ def update_from_journal(state: Dict[str, Dict[str, Any]],
 def derive_rejected_statuses(state: Dict[str, Dict[str, Any]],
                              position_presence: Dict[str, Optional[bool]],
                              position_scan_current: bool,
+                             now: float = None,
+                             retry_cooldown_seconds: float = None,
                              ) -> None:
     """Re-derive actionable statuses for rejected closes (Change F).
 
@@ -290,6 +354,9 @@ def derive_rejected_statuses(state: Dict[str, Dict[str, Any]],
     already-terminal entries are never reclassified.
     """
     settled_by_pool: Dict[str, float] = {}
+    now = time.time() if now is None else now
+    cooldown = (RETRY_COOLDOWN_SECONDS if retry_cooldown_seconds is None
+                else retry_cooldown_seconds)
     for entry in state.values():
         if not isinstance(entry, dict):
             continue
@@ -311,7 +378,9 @@ def derive_rejected_statuses(state: Dict[str, Dict[str, Any]],
             pool and rejected_at > 0
             and settled_by_pool.get(pool, 0.0) >= rejected_at)
         entry["status"] = _derive_rejected_status(
-            entry, present, position_scan_current, pool_settled_before)
+            entry, present, position_scan_current, pool_settled_before,
+            retry_ready=bool(rejected_at > 0
+                             and (now - rejected_at) >= cooldown))
 
 
 def advance(state: Dict[str, Dict[str, Any]],
@@ -540,6 +609,13 @@ def position_close_pending(close_state: Dict[str, Dict[str, Any]],
     a pool consistency check), never by pool alone. Settled entries never
     match — a settled close plus a fresh scan listing the position again
     means a NEW position, which must stay closeable.
+
+    CLOSE_RETRY_ALLOWED deliberately does NOT match: that status *is* the
+    authorization to re-emit, and treating it as "in flight" made the
+    evidence-gated retry unreachable (the retry was suppressed by the very
+    state that approved it). A retry always carries a new signal_id, so
+    position-level idempotency is preserved by the new entry superseding
+    the old one in mark_emitted().
     """
     if not position_id:
         return None
@@ -547,6 +623,8 @@ def position_close_pending(close_state: Dict[str, Dict[str, Any]],
         if not isinstance(entry, dict):
             continue
         if entry.get("status") in SETTLED_STATUSES:
+            continue
+        if entry.get("status") == "CLOSE_RETRY_ALLOWED":
             continue
         if entry.get("position_id") != position_id:
             continue
@@ -615,6 +693,121 @@ def prune_settled(state: Dict[str, Dict[str, Any]], now: float = None,
     return state
 
 
+# Statuses that mean "a close was emitted and no execution proof exists".
+# These are the entries a dry_run cycle can produce but never clear, because
+# clearing them requires a live journal decision that dry_run never writes.
+CHAIN_TRUTH_CANDIDATE_STATUSES: Set[str] = {
+    "CLOSE_EMITTED",
+    "CLOSE_UNKNOWN",
+    "CLOSE_UNKNOWN_TIMEOUT",
+    "CLOSE_RETRY_ALLOWED",
+    "CLOSE_REVIEW_REQUIRED",
+}
+
+
+def reconcile_chain_truth(state: Dict[str, Dict[str, Any]],
+                          chain_check: Any = None,
+                          rpc_url: Optional[str] = None,
+                          mode: Optional[str] = None,
+                          now: float = None,
+                          policy: Optional[Dict[str, Any]] = None,
+                          pending_position_ids: Optional[Set[str]] = None,
+                          ) -> Dict[str, Any]:
+    """Resolve emitted-but-never-executed closes against the chain.
+
+    Owner-approved 2026-10-19 for ``dry_run`` only. In a live mode the
+    journal ladder is the authority and this must stay OFF: resolving a
+    close on chain absence there would hide a real failed settlement.
+
+    An entry is resolved only when every one of these holds:
+
+    * mode is explicitly ``dry_run`` (never inferred, never defaulted);
+    * policy does not disable it;
+    * the entry is not ``manual`` and not already settled;
+    * the entry has both a ``position_id`` and a ``pool_address``;
+    * the position is not in flight (no pending signal for that position);
+    * :func:`chain_truth.check_position_absent` returns ``absent`` — pool
+      control resolved, position null at confirmed *and* finalized.
+
+    Resolved entries are stamped ``manual: False``, ``resolution:
+    "chain_truth"`` and carry the RPC evidence, so the audit trail says
+    exactly how the close was proven and that no human vouched for it.
+    """
+    now = time.time() if now is None else now
+    policy = policy or {}
+    report: Dict[str, Any] = {
+        "enabled": False, "mode": mode, "resolved": [], "skipped": [],
+        "reason": "",
+    }
+    if (mode or "").strip() != "dry_run":
+        report["reason"] = ("chain-truth reconciliation runs only in "
+                            "dry_run")
+        return report
+    if not policy.get("dry_run_chain_truth_reconciliation", True):
+        report["reason"] = "disabled by policy"
+        return report
+    if chain_check is None:
+        from . import chain_truth as _ct
+        chain_check = _ct.check_position_absent
+    report["enabled"] = True
+
+    pending = pending_position_ids or set()
+    seen: Dict[str, Dict[str, Any]] = {}
+    for sid in sorted(state):
+        entry = state.get(sid)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("manual") or entry.get("status") in SETTLED_STATUSES:
+            continue
+        status = entry.get("status")
+        if status not in CHAIN_TRUTH_CANDIDATE_STATUSES:
+            continue
+        position_id = entry.get("position_id")
+        pool_address = entry.get("pool_address")
+        if not position_id or not pool_address:
+            report["skipped"].append({
+                "signal_id": sid,
+                "reason": "entry has no position_id/pool_address; absence "
+                          "cannot be proven and it stays blocking"})
+            continue
+        if position_id in pending:
+            report["skipped"].append({
+                "signal_id": sid,
+                "reason": "close still pending in the signals queue"})
+            continue
+        # One RPC verdict per position per cycle, however many signals
+        # reference it (the 18 ghosts were 9 cycles x 2 positions).
+        key = str(position_id)
+        if key not in seen:
+            seen[key] = chain_check(rpc_url, position_id, pool_address)
+        evidence = seen[key]
+        if not evidence.get("absent"):
+            report["skipped"].append({
+                "signal_id": sid,
+                "position_id": position_id,
+                "reason": evidence.get("reason") or "not proven absent",
+            })
+            continue
+        entry["status"] = "CLOSE_RESOLVED"
+        entry["manual"] = False
+        entry["resolution"] = "chain_truth"
+        entry["resolved_at"] = now
+        entry["resolved_at_iso"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+        entry["chain_evidence"] = evidence
+        entry["note"] = (
+            "dry_run chain-truth: position account absent at confirmed and "
+            "finalized with pool control resolving; signal was consumed "
+            "without an execution decision")
+        report["resolved"].append({
+            "signal_id": sid,
+            "position_id": position_id,
+            "previous_status": status,
+            "pool_address": pool_address,
+        })
+    return report
+
+
 def summarize(state: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
     """Return (blocking_reasons, review_items) for the current state."""
     blocking: List[str] = []
@@ -647,6 +840,10 @@ def check_settlement(active_positions: Dict[str, Any],
                      policy: Optional[Dict[str, Any]] = None,
                      journal_dir: Optional[str] = None,
                      max_scan_age_seconds: float = 900.0,
+                     mode: Optional[str] = None,
+                     chain_rpc_url: Optional[str] = None,
+                     chain_check: Any = None,
+                     pending_position_ids: Optional[Set[str]] = None,
                      ) -> Tuple[bool, str, Dict[str, Dict[str, Any]], Dict[str, Any]]:
     """Full settlement check; returns (allowed, reason, state, details).
 
@@ -678,6 +875,12 @@ def check_settlement(active_positions: Dict[str, Any],
                              bool(position_mtime)
                              and (now - position_mtime)
                              <= max_scan_age_seconds)
+    # dry_run only: a close that was emitted but never executed can never
+    # advance on the journal ladder, so prove it on chain instead of
+    # re-emitting it forever. Live modes skip this entirely.
+    chain_report = reconcile_chain_truth(
+        state, chain_check=chain_check, rpc_url=chain_rpc_url, mode=mode,
+        now=now, policy=policy, pending_position_ids=pending_position_ids)
     blocking, review = summarize(state)
     prune_settled(state, now)
     details = {
@@ -687,6 +890,7 @@ def check_settlement(active_positions: Dict[str, Any],
         "settled": [sid for sid, e in state.items()
                     if isinstance(e, dict)
                     and e.get("status") in SETTLED_STATUSES],
+        "chain_truth": chain_report,
     }
     if blocking:
         reason = ("Close settlement gate blocked open: "
