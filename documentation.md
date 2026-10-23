@@ -223,14 +223,20 @@ remains unchanged — but it aids diagnostics and rotation timing decisions.
 - `score_position_staleness`: replaced by range efficiency (proportion of in-range days)
 - `score_position_depeg_exposure`: applied as multiplicative penalty cap (max 30% reduction) to final score
 
-#### `score_position_range_status(pos, max_pts)`
+#### `score_position_range_status(pos, max_pts)` (aligned with Missy edge_distance_frac)
 
-- lower/upper/current all present and upper > lower:
-  - out of range → 0
-  - in range → `max_pts * (0.6 + 0.4 * edge_frac)`; edge_frac is 1 in the
-    middle 50% of the range, fading to 0 at the bounds
-- else if `in_range` flag present → max or 0
-- else unknown (half credit)
+**Updated: centering reward aligned with Missy's edge_distance_frac semantics**
+
+- `edge_distance_frac`: 1.0 at center, 0.0 at boundary (per Missy scan format)
+- **New formula**: `max_pts * edge_frac` — full credit at center (1.0), zero at edge (0.0)
+- This aligns with Missy's native `edge_distance_frac` field semantics
+- Out-of-range → 0
+- In range with bounds present and current within [lower, upper]: score = `max_pts * edge_frac`
+  where `edge_frac = clamp(edge_distance_frac, 0, 1)`
+- If `in_range` flag present: falls back to `max_pts` if True, 0 if False
+- Unknown data → half credit (`max_pts * unknown_credit = 0.5 * max_pts`)
+
+**Rationale**: Being in the middle of the range is safest; approaching the edge increases risk of exiting the range. This formula directly uses Missy's `edge_distance_frac` field, where 1.0 = center position and 0.0 = at the boundary.
 
 #### `score_position_fee_capture(pos, max_pts, pool)`
 
@@ -258,11 +264,22 @@ remains unchanged — but it aids diagnostics and rotation timing decisions.
 - single-sided position (one token ui 0): score = held side's peg fraction
 - two-sided: `max_pts * min(fx, fy)`
 
-#### `score_position_staleness(pos, max_pts)`
+#### `score_position_staleness(pos, max_pts)` (updated edge-case handling)
 
-- `days_open` missing → unknown (half credit)
-- ≤ stale_grace_days (30) → full credit
-- linear erosion to 0 at stale_zero_days (120)
+**Staleness scoring with fail-closed data quality rules:**
+
+- **No lifetime data at all** (`total_days` missing): returns `max_pts * unknown_credit` (half credit, fail-closed)
+  - Rationale: unverifiable age must not read as evidence
+- **Negative lifetime data** (`total_days < 0`): returns `max_pts * unknown_credit` (not full efficiency)
+  - Rationale: nonsense data must not be rewarded
+- **Brand-new position** (`total_days == 0`): full efficiency credit (`max_pts`)
+  - Rationale: zero-age position has not yet demonstrated range exit risk
+- **Within grace period** (`0 < total_days <= grace`): full credit
+- **Beyond grace, before zero**: linear erosion from 1.0 to 0 as days approach `stale_zero_days` (120)
+  - Formula: `max_pts * clamp(1 - (days - grace) / (zero - grace), 0, 1)` where grace=30, zero=120
+- **`days_open` missing** but `in_range` known: conservatively assumes partial efficiency
+
+**Key change**: Stricter fail-closed behavior — unknown or nonsense lifetime data now explicitly returns unknown credit rather than assuming full efficiency.
 
 ## Verdict Thresholds (config: `pool_thresholds`, `position_thresholds`)
 
