@@ -35,6 +35,7 @@ import sys
 import time
 from copy import deepcopy
 from functools import lru_cache
+from typing import Any, Optional, Union
 
 from capital import summarize_wallet
 import dynamic
@@ -173,6 +174,20 @@ DEFAULT_CONFIG = {
 U64_MAX = (1 << 64) - 1
 
 
+_UNKNOWN_WARNING_THRESHOLD = 3  # warn when a position has >N unknown components
+
+
+def _flag_data_quality(unknown_parts: list, n_components: int) -> Optional[str]:
+    """Return a data quality warning message when unknown components exceed threshold.
+
+    Returns None when no warning needed.
+    """
+    if len(unknown_parts) > _UNKNOWN_WARNING_THRESHOLD:
+        return f"data quality: {len(unknown_parts)}/{n_components} components unknown " \
+               f"({', '.join(unknown_parts)})"
+    return None
+
+
 class ConfigError(Exception):
     """Raised when profiles.json is present but invalid."""
 
@@ -273,6 +288,11 @@ def set_config(cfg: dict) -> None:
 
 def get_config() -> dict:
     return _CONFIG
+
+
+def scoring_profile_version() -> str:
+    """Return the active profiles.json version string for audit/logging."""
+    return _CONFIG.get("version", "1")
 
 
 # --------------------------------------------------------------------------
@@ -1167,6 +1187,11 @@ def _score_position_core(pos: dict, pool, pool_name, pair_class, sym_x, sym_y,
     if unknown_parts and verdict != "REVIEW":
         reason += f" (unknown: {', '.join(unknown_parts)})"
 
+    # Data quality warning: flag when too many components are unknown
+    dq_warning = _flag_data_quality(unknown_parts, len(components))
+    if dq_warning:
+        reason += f" | {dq_warning}"
+
     # Fee harvesting: worth the tx cost when fees clear collect_pct_of_value
     # of position value (or the floor when value is unknown). Unknown fees
     # never trigger a collection signal.
@@ -1393,9 +1418,12 @@ def render_summary(report: dict) -> str:
         lines.append("Open LP positions:")
         for s in report["position_scores"]:
             extra = " (fees ready to collect)" if s["collect_fees"] else ""
+            dq_note = ""
+            if s.get("data_quality", {}).get("unknown_components"):
+                dq_note = f" | {s['reason']}" if "|" not in s.get("reason", "") else ""
             lines.append(f"  {str(s['pool']):<22} [{s.get('pair_class') or '-':<17}] "
-                         f"score={s['score']:>6.1f}  {s['verdict']}{extra}")
-            if s.get("reason"):
+                         f"score={s['score']:>6.1f}  {s['verdict']}{extra}{dq_note}")
+            if s.get("reason") and "|" not in s.get("reason", ""):
                 lines.append(f"    reason: {s['reason']}")
     else:
         lines.append("Open LP positions: none")

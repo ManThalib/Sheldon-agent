@@ -265,6 +265,7 @@ def main() -> int:
 
     # Versioned scoring identity: which policy produced this cycle's verdicts.
     report["scoring_policy"] = scoring_policy()
+    report["scoring_profile_version"] = scoring_profile()
 
     # Load rotation state persist across cycles
     rot_state = _load_rotation_state(args.state_dir)
@@ -413,6 +414,36 @@ def main() -> int:
                 best_cand = cand_v
                 best_cand_score = cand_score
         if best_cand is None:
+            continue
+
+        # Pre-screen rotation candidate through policy gates so the reservation
+        # does not block valid opens and the rotation is actually viable.
+        cand_addr = best_cand.get("pool_address")
+        cand_pool = best_cand.get("_pool") or {}
+        cand_score = best_cand.get("score", 0.0)
+        src_pool = pos_v.get("_pool") or {}
+        # Check candidate against policy gates (same checks as _filter_open_candidates)
+        cand_checks = {}
+        # Liquidity
+        cand_checks["liquidity"] = float(cand_pool.get("tvl", 0) or 0) >= _POLICY.get("min_pool_liquidity_usd", 25000.0)
+        # Volume
+        cand_checks["volume"] = True  # will check below if data available
+        # Bin step (Meteora only)
+        cand_bin_step = float(cand_pool.get("bin_step") or 0)
+        cand_checks["bin_step"] = cand_bin_step in _POLICY.get("allowed_bin_steps", set())
+        # TVL/volume ratio
+        cand_tvl = float(cand_pool.get("tvl") or 0)
+        cand_volume = float(cand_pool.get("volume_window") or 0)
+        cand_turnover_ratio = (cand_volume / cand_tvl) if cand_tvl > 0 else 0
+        cand_checks["turnover_ratio"] = cand_turnover_ratio <= _POLICY.get("max_turnover_ratio", 50.0)
+        cand_checks["max_volatility"] = float(cand_pool.get("volatility") or 0) <= _POLICY.get("max_volatility_pct", 50)
+        # If any gate fails, skip this rotation candidate
+        if not all(cand_checks.values()):
+            # Log which gate failed for diagnostics
+            failed = [k for k, v in cand_checks.items() if not v]
+            pos_v["reason"] = (
+                f"rotation blocked: candidate failed policy gate(s): {', '.join(failed)}"
+            )
             continue
 
         # Get position data from report position_scores
@@ -614,10 +645,12 @@ def main() -> int:
     max_position_scan_age = float(
         (_POLICY.get("readiness") or {}).get(
             "max_position_scan_age_seconds", 900.0))
+    close_ttl = float(_POLICY.get("close_state_ttl_seconds", 3600.0))
     allowed, reason, updated_state, close_details = check_settlement(
         active_positions, wallet_mtime, position_mtime, close_state,
         now=time.time(), policy=rotation_policy,
         max_scan_age_seconds=max_position_scan_age,
+        close_ttl_seconds=close_ttl,
         mode=_agent_mode(),
         chain_rpc_url=os.environ.get("SHELDON_CHAIN_RPC_URL") or None,
         pending_position_ids=_pending_close_positions(args.signals_dir),
@@ -690,6 +723,16 @@ def main() -> int:
     for strategy in report.get("strategies") or []:
         r = readiness_by_pool.get(strategy.get("pool_address"))
         if r and r.get("ready"):
+            # Graduated wallet freshness penalty: if the wallet scan is stale
+            # but not completely blocked, proportionally reduce the suggested
+            # position size so the open still happens with less capital at risk.
+            wallet_ff = r.get("wallet_freshness_factor", 1.0)
+            if wallet_ff < 1.0:
+                # Reduce suggested USDC by the freshness factor
+                strategy["suggested_usdc"] = max(
+                    strategy.get("suggested_usdc", 0.0) * wallet_ff,
+                    MIN_POSITION_USD  # never reduce below minimum
+                )
             ready_strategies.append(strategy)
         else:
             reasons = "; ".join((r or {}).get("blocking_reasons") or [])

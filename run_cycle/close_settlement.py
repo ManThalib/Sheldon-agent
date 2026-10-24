@@ -390,6 +390,7 @@ def advance(state: Dict[str, Dict[str, Any]],
             now: float = None,
             policy: Optional[Dict[str, Any]] = None,
             max_scan_age_seconds: float = 900.0,
+            close_ttl_seconds: float = UNKNOWN_TTL_SECONDS,
             ) -> Dict[str, Dict[str, Any]]:
     """Drive per-entry settlement transitions, in place.
 
@@ -465,7 +466,7 @@ def advance(state: Dict[str, Dict[str, Any]],
 
         if status == "CLOSE_EMITTED":
             emit_ts = entry.get("emit_time") or 0.0
-            if emit_ts and emit_ts < now - UNKNOWN_TTL_SECONDS:
+            if emit_ts and emit_ts < now - close_ttl_seconds:
                 # Lost close: no journal record ever arrived. Escalate to
                 # review; it keeps blocking (a timeout never resolves a
                 # close by itself) but it is now visible on the review
@@ -475,7 +476,7 @@ def advance(state: Dict[str, Dict[str, Any]],
 
         if status == "CLOSE_UNKNOWN" and require_chain is not None:
             emit_ts = entry.get("emit_time") or 0.0
-            if emit_ts and emit_ts < now - UNKNOWN_TTL_SECONDS:
+            if emit_ts and emit_ts < now - close_ttl_seconds:
                 entry["status"] = "CLOSE_UNKNOWN_TIMEOUT"
                 entry["timed_out_at"] = now
     return state

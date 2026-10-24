@@ -6,6 +6,7 @@ their own copies, and the idle-capital gate that previously compared nothing.
 
 import sys
 import unittest
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -114,8 +115,7 @@ class PolicySourceTests(unittest.TestCase):
         import json
         from strategy.sheldon_policy import METEORA_BIN_STEP_RULE
 
-        data = json.loads((Path(__file__).resolve().parent /
-                           "sheldon_policy.json").read_text())
+        data = json.loads(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sheldon_policy.json")).read())
         self.assertNotIn("allowed_bin_steps", data,
                          "dead top-level list must stay removed")
         self.assertIn("bin_step_rule", data["pool_eligibility"])

@@ -63,6 +63,7 @@
     "max_scan_age_seconds": 900,
     "require_scan_newer_than_last_close": true
   },
+  "close_state_ttl_seconds": 3600,
   "reopen_cooldown_seconds": 2700,
   "add_policy": {
     "enabled": true,

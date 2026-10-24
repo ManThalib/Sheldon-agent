@@ -349,6 +349,28 @@ def select_add_candidate(tracked: List[dict], pool_scores: List[dict],
                                        f"min_add_usd ${policy.get('add_min_usd', 5.0):.2f}")})
             continue
 
+        # Improve headroom: account for range utilization so we don't overallocate
+        # to a position that already occupies most of its range. When the active
+        # bin is near the upper boundary, less additional liquidity can be effectively
+        # deployed before hitting the range edge.
+        lower, upper = int(lower), int(upper)
+        active_bin = int(active_bin)
+        if upper > lower and lower <= active_bin < upper:
+            utilization = (active_bin - lower) / (upper - lower)  # 0.0 at lower, 1.0 at upper
+            # Reduce effective headroom: the closer to the upper boundary, the less
+            # new liquidity can spread before hitting the edge. Halve the penalty
+            # so full-range positions (util≈0.5) get ~75% headroom, edge positions
+            # (util≈1.0) get ~50% headroom.
+            util_penalty = 1.0 - 0.5 * utilization
+            effective_headroom = headroom * max(0.2, min(0.8, util_penalty))
+        else:
+            effective_headroom = headroom
+        if effective_headroom < float(policy.get("add_min_usd", 5.0)):
+            skipped.append({**base,
+                            "reason": (f"headroom ${headroom:.2f} effective=${effective_headroom:.2f} "
+                                       f"< min_add_usd ${policy.get('add_min_usd', 5.0):.2f}")})
+            continue
+
         # Score: live pool score when screened this cycle, else the floor
         # just under min_open_score (last-known-good pool, loses to opens).
         candidates.append({
@@ -357,6 +379,7 @@ def select_add_candidate(tracked: List[dict], pool_scores: List[dict],
             "active_bin": int(active_bin),
             "tracked_value_usd": tracked_value,
             "headroom_usd": headroom,
+            "effective_headroom_usd": effective_headroom,
             "score": scores.get(addr, floor_score),
         })
 
@@ -462,7 +485,7 @@ def plan_sweep(report: dict, signals_dir: str, wallet_mtime: float,
         info["reason"] = "no qualifying add target (see skipped)"
         return None, info
 
-    add_amount = round(min(idle_usd, float(best["headroom_usd"])), 2)
+    add_amount = round(min(idle_usd, float(best.get("effective_headroom_usd", best["headroom_usd"]))), 2)
     if add_amount < min_add:
         info["reason"] = (f"add ${add_amount:.2f} shrank below min_add_usd "
                           f"after headroom cap")

@@ -1,0 +1,671 @@
+# Documentation
+
+## Table of Contents
+
+- [Configuration](#configuration)
+- [Pair Classification and Universe Gate](#pair-classification-and-universe-gate)
+- [Scoring Formulas](#scoring-formulas)
+- [Scoring-policy audit trail](#scoring-policy-audit-trail)
+- [Cross-model with new_fc_score](#cross-model-with-new_fc_score)
+- [Dual-model scoring gate](#dual-model-scoring-gate)
+- [Backtest: scoring source and gate agreement](#backtest-scoring-source-and-gate-agreement)
+- [Dual-model scoring gate](#dual-model-scoring-gate-1)
+- [Pool LP Opportunity Score](#pool-lp-opportunity-score)
+- [Position Health Score](#position-health-score)
+- [Verdict Thresholds](#verdict-thresholds)
+- [Data Quality Tracking](#data-quality-tracking)
+- [Signal Building](#signal-building)
+- [Range Center](#range-center)
+- [Capital Input](#capital-input)
+- [Strategy, Readiness, Grace, Sweep](#strategy-readiness-grace-sweep)
+- [Backtesting](#backtesting)
+- [CLI Arguments](#cli-arguments)
+- [Constants](#constants)
+- [Tests](#tests)
+- [Pool-to-George Pipeline](#pool-to-george-pipeline)
+- [Signal Schema for George](#signal-schema-for-george)
+
+
+## Configuration
+
+All weights, thresholds, and tuning constants live in `profiles.json` next to
+`lp_scoring.py`. Rules:
+
+- Missing file → built-in defaults (identical to the shipped profiles.json).
+- Present but invalid (weights not summing to 100, unordered thresholds,
+  bad constants) → fatal `ConfigError`, exit code 1 (fail-closed).
+- Any subset may be overridden; the rest merges from defaults.
+
+`lp_scoring.set_config()` swaps configuration programmatically (used by tests).
+
+## Pair Classification and Universe Gate
+
+Universe policy: **stablecoins and high-caps only**. Every pool/position is
+classified from its pair symbols (explicit `token_x_symbol`/`token_y_symbol`,
+or parsed from the pool name like `SOL-USDC (bin 4)`). Results are cached per
+symbol triple.
+
+- both in `STABLECOINS` → `stable_stable`
+- one stable, one in `HIGH_CAPS` → `stable_bluechip`
+- both in `HIGH_CAPS` → `bluechip_bluechip`
+- anything else → `off_universe` (pool: IGNORE; position: CLOSE, policy rule)
+- unparseable → `unknown` (same gating as off_universe)
+
+## Scoring Formulas
+
+### Scoring Source
+
+Sheldon's scoring source is controlled by `sheldon_policy.json`:
+
+```json
+"scoring": {
+  "source": "missy",
+  "min_open_score": 70.0,
+  "version": 1
+}
+```
+
+- `"missy"` (default): consume the `score` and `score_breakdown` emitted by
+  Missy for each pool. The raw score is used directly; verdicts are still
+  computed against the local `pool_thresholds` (and adaptive thresholds when
+  enabled). Component names are mapped from Missy breakdown keys:
+  `yield_score → fee_yield`, `depth_score → depth`,
+  `efficiency_score → turnover`, `risk_score → volatility_fit`.
+- `"local"`: re-run Sheldon's own `score_pool()` from Missy's raw feature
+  vector. This path is retained for backtesting and for pools that lack a
+  Missy score.
+
+When the pool record does not contain `score`, the Missy source falls back
+locally so legacy scans and tests remain valid.
+
+### Scoring-policy audit trail
+
+Every cycle report carries `scoring_policy` (`source`, `version`,
+`min_open_score`), every `pool_scores` entry from the Missy path carries
+`score_policy` (`source`, `version`), and every emitted `open` signal carries
+`score_policy` — so any verdict or signal can be traced to the exact policy
+that produced it. George's `common/rails_loader.py` reads `min_open_score`
+from the same `scoring` block (falling back to the legacy
+`pool_eligibility` path) and exposes `scoring_source` for diagnostics.
+
+**Cross-model with new_fc_score**: Every `pool_scores` entry from the Missy path now also carries
+`new_fc_score`, `new_fc_components`, `new_fc_verdict`, and `cross_model`
+fields. These reflect the experimental fee-capture model (log-scaled fee/TVL
+ratio, daily fee USD, volatility effectiveness, turnover penalty) and provide
+a secondary lens alongside missy-default. The `cross_model` field notes
+agreement (`both open (agreement)`) or disagreement (`missy=open new_fc=ignore`)
+between the two models. This aids diagnostics: significant disagreement
+triggers investigation into `fee_tvl_ratio`, turnover sustainability, or
+volatility effectiveness.
+
+**Dual-model scoring gate** (run_cycle/gates.py): Open candidates now pass
+through a dual-model gate that requires cross-model agreement or a combined
+score. The `missy` pool score must meet `min_open_score` AND the `new_fc`
+fee-capture model score must also meet the threshold, OR a weighted combination
+(`missy_weight=0.6, new_fc_weight=0.4`) is used when `use_weighted_combination`
+is enabled in context. If models disagree without the weighted combination, the
+conservative approach is to skip the candidate.
+
+### Backtest: scoring source and gate agreement
+
+`backtest.py` replays history through either scorer:
+
+```bash
+python3 backtest.py --scoring-source policy   # follow sheldon_policy.json (default)
+python3 backtest.py --scoring-source missy    # replay with Missy's score
+python3 backtest.py --scoring-source local    # replay with Sheldon's own model
+```
+
+The chosen source is reported as `scoring_source` in the JSON output.
+Compare sources before trusting a rule change: Missy's default score
+distribution is more permissive than Sheldon's local model, so the OPEN rate differs
+materially between sources.
+
+The legacy TVL/volume backstop in `_filter_open_candidates` can only be
+removed after a full verification window. Evidence tool:
+
+```bash
+python3 backtest.py --gate-report [--json]
+```
+
+It walks every historical pool scan and compares Missy's `eligible` flag
+against the legacy gates, counts agreement and both mismatch directions
+(Missy stricter / legacy stricter), histograms Missy reject reasons, and
+prints a backstop verdict: keep while any scan lacks the flag or any pool
+shows `legacy_strict`.
+
+### Dual-model scoring gate
+
+Open candidates now pass through a dual-model gate in `_filter_open_candidates`
+(run_cycle/gates.py). The gate requires:
+
+1. **Both models above threshold**: Both `missy_score >= min_open_score` AND
+   `new_fc_score >= min_open_score`
+
+2. **Or weighted combination**: When `use_weighted_combination` is enabled in
+   context, a combined score is computed as `0.6 * missy_score + 0.4 * new_fc_score`.
+   The candidate passes if the combined score >= min_open_score.
+
+3. **Cross-model agreement**: If models disagree without the weighted combo,
+   the candidate is conservatively skipped (dual-model disagreement).
+
+4. **Decision**: The final score used is the combined score (if weighted) or the
+   missy score otherwise.
+
+This dual-model approach ensures that pools must be strong according to both
+the missy-default APR/TVL/volatility model AND the new_fc fee-capture model
+(or their weighted combination) to be considered for opening positions.
+
+### Pool LP Opportunity Score
+
+Each component is scored 0-its-weight, then summed to 0-100 (clamped).
+
+#### `score_pool_fee_yield(pool, max_pts, apr_cap_pct)`
+
+```text
+fee_yield = max_pts * ratio**2  # sqrt curve
+```text
+where `ratio = clamp(realized_fee_apr / apr_cap_pct, 0.0, 1.0)`
+
+- **Updated: square-root curve** rewards moving from 0→10% APR more than 50→60% APR,
+  dampening unsustainable ultra-high APR effects.
+- `realized_fee_apr` only; fee/TVL is NOT added (it duplicates turnover)
+- `apr_cap_pct`: 100 for stable_stable, 300 otherwise
+
+#### `score_pool_turnover(pool, max_pts)`
+
+```text
+turnover = max_pts * clamp((volume_window / tvl) / turnover_max, 0, 1)
+```
+
+- `turnover_max` = 5.0 (config); 0 if TVL is 0
+
+#### `score_pool_depth(pool, max_pts)`
+
+```text
+if tvl < depth_min_usd (50k): 0
+else: max_pts * log(tvl / 50k) / log(5M / 50k)
+```
+
+#### `score_pool_volatility_fit(pool, max_pts, peak_pct)`
+
+**Volatility fitness score** (proportional clamp, not triangular):
+
+- **Updated: instead of triangular curve peaking at 'peak', this uses a proportional clamp.**
+  Higher vol → more fees. Vol at or above peak_pct gets full points; below peak gets proportional; zero vol gets 0.**
+- vol ≤ 0 → 0
+- vol ≥ peak_pct → full max_pts
+- 0 < vol < peak_pct: `max_pts * (vol / peak_pct)` (proportional)
+
+#### `score_pool_new_fc(pool, ctx)` (experimental fee-capture model)
+
+Computes `new_fc_score` (0-100) with five component breakdowns:
+
+| Component | Weight | What it measures |
+|---|---|---|
+| `fee_yield_score` | 35% | Log-scaled fee/TVL ratio normalised 0.05%→5% |
+| `absolute_fee_score` | 25% | Daily fee USD vs $200 benchmark |
+| `liquidity_effectiveness` | 20% | Penalty for volatility deviating from 15% target |
+| `turnover_penalty_score` | 10% | Rewards moderate turnover, caps at 20×TVL/day |
+| `lp_share_adjustment` | 10% | Proportion of fees to single LP (not computed here) |
+
+The total score is a weighted sum of these components using pair-class weights
+from `profiles.json` (or experimental defaults if the profile lacks
+`new_fc_weights`). This model is distinct from missy-default (APR/TVL/volatility)
+and provides a complementary lens for pool selection decisions.
+
+#### `score_pool_depeg_safety(pool, max_pts, sym_x, sym_y)`
+
+Stable side(s) only; worst side wins:
+
+```text
+per stable side: clamp(1 - |price_usd - 1| / depeg_zero_dist, 0, 1)
+score = max_pts * min(side_scores)
+unknown stable price → unknown_credit (0.5) for that side
+not applicable (no stable side) → full credit
+```
+
+### Position Health Score
+
+Each component returns `(points, known)`. Unknown inputs still contribute
+`max_pts × unknown_credit` (0.5) to the score but are recorded in
+`data_quality.unknown_components`, which caps the verdict at REVIEW.
+
+**NEW: new_fc_score** (experimental, complementary to missy-default).
+The position result now carries `new_fc_score`, `new_fc_components`,
+`new_fc_verdict`, and `cross_model` fields from the fee-capture model.
+These provide a secondary lens on position health: `fee_yield_score` reflects
+fee efficiency relative to TVL, `liquidity_effectiveness` penalizes volatility
+deviating from 15% target, and `turnover_penalty_score` rewards moderate
+turnover (< 20×TVL/day). The `cross_model` field notes agreement or disagreement
+between the missy-default and new_fc verdicts. This does not replace the
+position health score — Sheldon's policy (weights, thresholds, verdicts)
+remains unchanged — but it aids diagnostics and rotation timing decisions.
+
+**Updated position scoring formulas** (newwest):
+- `score_position_range_status`: centering reward `max_pts * (1.0 - edge_frac)` — 1.0 at center, 0.0 at edge
+- `score_position_fee_capture`: APR-normalized efficiency blend `blended = 0.7 * efficiency_norm + 0.3 * ratio`
+- `score_position_il_risk`: net yield coverage `clamp(1.0 + (fees - IL) / value, 0, 2)` — positive net yield scores above baseline
+- `score_position_staleness`: replaced by range efficiency (proportion of in-range days)
+- `score_position_depeg_exposure`: applied as multiplicative penalty cap (max 30% reduction) to final score
+
+#### `score_position_range_status(pos, max_pts)` (aligned with Missy edge_distance_frac)
+
+**Updated: centering reward aligned with Missy's edge_distance_frac semantics**
+
+- `edge_distance_frac`: 1.0 at center, 0.0 at boundary (per Missy scan format)
+- **New formula**: `max_pts * edge_frac` — full credit at center (1.0), zero at edge (0.0)
+- This aligns with Missy's native `edge_distance_frac` field semantics
+- Out-of-range → 0
+- In range with bounds present and current within [lower, upper]: score = `max_pts * edge_frac`
+  where `edge_frac = clamp(edge_distance_frac, 0, 1)`
+- If `in_range` flag present: falls back to `max_pts` if True, 0 if False
+- Unknown data → half credit (`max_pts * unknown_credit = 0.5 * max_pts`)
+
+**Rationale**: Being in the middle of the range is safest; approaching the edge increases risk of exiting the range. This formula directly uses Missy's `edge_distance_frac` field, where 1.0 = center position and 0.0 = at the boundary.
+
+#### `score_position_fee_capture(pos, max_pts, pool)`
+
+- `fees_usd` unknown (missing, or `fees_owed_raw` contains a `u64::MAX`
+  sentinel) → unknown
+- `expected_fees_usd` used when reported; otherwise estimated:
+  `value × realized_fee_apr/100 × min(days_open, fee_expect_max_days)/365`
+  (`fee_expect_max_days` = 30)
+- otherwise `max_pts * clamp(fees/expected, 0, 1)`
+
+#### `score_position_il_risk(pos, max_pts, pool)` (bluechip classes)
+
+- `il_estimate_pct` used when reported
+- otherwise estimated from pool daily volatility and range concentration:
+  `il% = conc × (vol/100)² / 8 × 100 × days`, with
+  `conc = clamp(il_conc_full_width_ticks / range_width, 1, il_conc_max)`
+  (2000 ticks reference, cap 4x; unknown width assumed fully concentrated)
+- score `max_pts * clamp(1 - il / il_zero_pct)` (`il_zero_pct` = 10)
+- unknown when pool volatility is 0 or days_open missing
+
+#### `score_position_depeg_exposure(pos, max_pts, sym_x, sym_y, pool)` (stable classes)
+
+- per stable side: `clamp(1 - |price - 1| / depeg_zero_dist, 0, 1)`;
+  unknown price → half credit and marks the component unknown
+- single-sided position (one token ui 0): score = held side's peg fraction
+- two-sided: `max_pts * min(fx, fy)`
+
+#### `score_position_staleness(pos, max_pts)` (updated edge-case handling)
+
+**Staleness scoring with fail-closed data quality rules:**
+
+- **No lifetime data at all** (`total_days` missing): returns `max_pts * unknown_credit` (half credit, fail-closed)
+  - Rationale: unverifiable age must not read as evidence
+- **Negative lifetime data** (`total_days < 0`): returns `max_pts * unknown_credit` (not full efficiency)
+  - Rationale: nonsense data must not be rewarded
+- **Brand-new position** (`total_days == 0`): full efficiency credit (`max_pts`)
+  - Rationale: zero-age position has not yet demonstrated range exit risk
+- **Within grace period** (`0 < total_days <= grace`): full credit
+- **Beyond grace, before zero**: linear erosion from 1.0 to 0 as days approach `stale_zero_days` (120)
+  - Formula: `max_pts * clamp(1 - (days - grace) / (zero - grace), 0, 1)` where grace=30, zero=120
+- **`days_open` missing** but `in_range` known: conservatively assumes partial efficiency
+
+**Key change**: Stricter fail-closed behavior — unknown or nonsense lifetime data now explicitly returns unknown credit rather than assuming full efficiency.
+
+## Verdict Thresholds (config: `pool_thresholds`, `position_thresholds`)
+
+- Pool: open ≥ 70.0, watch ≥ 55.0 (adaptive mode: quantiles of the scored
+  universe, floored by `max(floor_open, sheldon_policy min_open_score)`)
+- Position: close < 40.0, review < 60.0, hold ≥ 60.0
+- **Open/close separation**: CLOSE requires every component scored on known
+  data; any unknown component caps at REVIEW. Policy CLOSE (off-universe /
+  unknown pair) ignores this rule.
+- Collect fees: HOLD + fees known + fees ≥ max(collect_min_usd $5,
+  collect_pct_of_value 1% × value)
+
+Every verdict includes a `reason` string, e.g.
+`score 35.0 < close threshold 40.0 but unknown: fee_capture` or
+`volatility unknown`.
+
+## Data Quality Tracking
+
+Each position result carries:
+
+```json
+"data_quality": {
+  "unknown_components": ["fee_capture", "il_risk"],
+  "policy_close": false
+}
+```
+
+`policy_close: true` marks the off-universe hard gate. Consumers (dashboards,
+George) can distinguish "bad position" from "bad data".
+
+## Signal Building (run_cycle.py)
+
+### `_build_open_signal(strategy, v, idx, base)`
+
+Requirements (returns `None` if any unmet): supported dex, `_pool` present,
+pool passes `meteora_bin_step_allowed` (fail-closed), score present and ≥
+policy `min_open_score`, positive prices/decimals, `suggested_usdc >=
+MIN_POSITION_USD`, and a non-`None` `strategy["bin_range"]` from
+`strategy.build_strategies` (volatility-adaptive, not fixed ±100). Produces a
+50/50-split `open` intent with `max_slippage_bps=100`.
+
+Open candidates first pass `_filter_open_candidates`: dedup (one position per
+pool), duplicate-pool, `center == 0` refusal, trading window/blackout
+(`_in_trading_window`, Asia/Shanghai), Missy eligibility flag (Phase 2;
+legacy TVL/volume backstop only when the flag is absent), and the
+Meteora `allowed_bin_steps` rail. `build_strategies` keeps the top
+`max_opens_per_cycle=3` by score. `plan_funding` + `gate_prep_swaps` then split
+funded strategies (→ open) from shortfalls (→ prep `swap`) and surpluses
+(→ sell `swap`). Opens are written first so `idle_sweep.plan_sweep` can treat
+pending opens/preps as committed capital.
+
+Other signals: `CLOSE`/`REBALANCE` (post-grace) → `close`, `COLLECT_FEES` →
+`claim_fees`, dust assets → `swap_to_usdc`, funding deltas → prep `swap`,
+leftover idle → `add_liquidity` sweep. HOLD/REVIEW/WATCH/IGNORE produce no signal.
+
+### `_range_center(pool, dex)` (also `strategy._range_center`)
+
+- Meteora: `active_bin_id` > `current_tick_equivalent` (RPC-batched) >
+  `current_tick_index` — RPC-batched tick enrichment (`tick_source: "rpc_batched"`)
+  from `SOLANA_RPC_URL` fills `active_bin_id`, `current_tick_index`, and
+  `current_tick_equivalent` fields, given high precedence over legacy values.
+- Raydium/Orca: `current_tick_equivalent` > `current_tick` > `current_tick_index` >
+  `active_bin_id` — RPC-enriched fields given high precedence.
+
+### Capital input (`capital.summarize_wallet`, `readiness.load_raw_wallet`)
+
+1. Newest Missy wallet scan under `--wallet-scans-dir`
+   (`wallet_screen-latest.json`): idle USDC + dust assets + per-token balances
+2. 0.0 (skips OPEN signal)
+
+No `SHELDON_IDLE_USDC` env var, no `wallet_balances.json` cache, no RPC lookup.
+
+## Strategy, Readiness, Grace, Sweep
+
+- `strategy.py`: `get_policy()` (from `sheldon_policy.json`; now includes
+  `scoring.source`, `min_open_score`, `allowed_bin_steps`, and deprecated
+  legacy gates), `suggested_position_usd` (`min(deployable*0.75, max)`), `open_eligible`, `open_eligible` gate, `build_strategies`
+  (top 3 by score), `adaptive_half_width` (see ./architecture.md), `_range_center`,
+  `meteora_bin_step_allowed` (fail-closed), `capital_plan`. Meteora width capped by
+  George `execution_limits.json` `max_meteora_range_width=70`.
+- `readiness.py`: `plan_funding`, `gate_prep_swaps`, `build_prep_swap_signal`,
+  `load_raw_wallet`. Rails: `SOL_RESERVE_LAMPORTS=20M`, `BUY_BUFFER_PCT=2.0`,
+  `MIN_PREP_SWAP_USD=1.0`, `SELL_SURPLUS_MIN_USD=2.0`,
+  `MAX_PREP_SWAPS_PER_MINT_PER_HOUR=3`, `PREP_CONFIRM_GRACE_SECONDS=60`,
+  `MAX_WALLET_SCAN_AGE_SECONDS=180`.
+- `range_state.py`: `classify_oor_side` (price bounds, else decoded
+  bin/tick bounds; zero/absent/inverted bounds = unknown, never a side),
+  `update_out_of_range_state` (side-aware counters),
+  `out_of_range_position_verdict` (full-right OOR closes immediately; full-left
+  OOR closes from run `ALLOWED_OUT_OF_RANGE_RUNS=2`; unknown data never closes),
+  `state/out_of_range.json` (v2 `positions` map; legacy `out_of_range_counts`
+  is read as a left-side counter).
+- `idle_sweep.py`: `plan_sweep`/`execute_sweep`, `load_add_state`,
+  `state/add_state.json`, `RESERVATION_MAX_AGE_SECONDS=3600`,
+  floor-score epsilon 0.01 below `min_open_score`.
+- `capital.py`: `summarize_wallet`, `USDC_MINT`, `SOL_MINT`,
+  `RESERVED_MINTS` (SOL + owner hold), `DUST_MIN_USD=1.0`,
+  `deployable = idle + dust_total`.
+- `profiles.py` / `models.py`: legacy, unused (nothing imports them).
+
+## Backtesting
+
+`backtest.py` replays the Missy scan archive through the scoring engine:
+
+```bash
+python3 backtest.py [--data-dir /data/missy-data] [--pools-dir D] [--positions-dir D]
+  [--horizon 4] [--width 200] [--position-value-usd 100]
+  [--entry-cost-bps 50] [--exit-cost-bps 50] [--claim-cost-usd 0.02]
+  [--bootstrap-samples 1000] [--seed 42] [--dynamic] [--json] [--detail]
+```
+
+- **Pool replay**: scores each historical `pool_scan`; for pools that were
+  OPEN_CANDIDATE at time T, measures forward `realized_fee_apr` over the
+  next `--horizon` scans and range survival (did price stay inside the
+  would-be ±width range). Baseline = all scored pools, so you can see
+  whether OPEN selection beats average.
+- **Position replay**: scores each historical `position_scan`; for each
+  verdict tracks the forward `current_value_usd` trajectory of the same
+  position address across later scans.
+
+Caveat: scans before 2026-09-25 15:16 UTC lack Jupiter price enrichment
+(`token_*_price_usd`), so older scans score lower on depeg/fee components.
+The backtest reports per-scan input completeness so you can segment.
+Beyond verdict replay it computes synthetic PnL per OPEN_CANDIDATE (entry/exit
+bps + claim USD on `--position-value-usd`), walk-forward stats, and bootstrap
+resampling (`--bootstrap-samples`, `--seed`).
+
+`tuner.py` usage:
+
+```bash
+python3 tuner.py [--data-dir D] [--pools-dir D] [--horizon N] [--width N]
+  [--candidates 30] [--seed 42] [--train-frac 0.8]
+  [--output profiles.tuned.json] [--apply]
+```
+
+Randomly perturbs base pool weights, evaluates train/validation (last
+`1-train_frac` of scans) mean PnL via the backtest, keeps candidates beating
+the baseline on validation, writes the top 10 + best to `--output`.
+`--apply` overwrites `profiles.json` (backup `profiles.json.bak.<ts>`).
+
+## CLI Arguments
+
+### `lp_scoring.py`
+
+| Arg | Default | Description |
+|---|---|---|
+| `--pools-dir` | `/data/missy-data/pool_screens` | Pool scan directory |
+| `--positions-dir` | `/data/missy-data/position_scans` | Position scan directory |
+| `--wallet-scans-dir` | `/data/missy-data/wallet_screens` | Wallet scan directory |
+| `--json` | — | Full JSON report to stdout |
+
+### `run_cycle.py`
+
+| Arg | Default | Description |
+|---|---|---|
+| `--pools-dir` | `/data/missy-data/pool_screens` | Pool scan directory |
+| `--positions-dir` | `/data/missy-data/position_scans` | Position scan directory |
+| `--wallet-scans-dir` | `/data/missy-data/wallet_screens` | Wallet scan directory |
+| `--write-signals` | — | Write George-schema signal files |
+| `--signals-dir` | george signals/pending | Signal output directory |
+| `--memory-dir` | sheldon memory | Daily markdown log directory |
+| `--state-dir` | `<repo>/state` | Grace + sweep state directory |
+| `--json` | — | Full JSON report to stdout |
+| `--max-age-seconds` | `3900.0` | Data freshness window |
+
+Note: Missy's cron cadence has gaps > 3900 s (e.g. 06:59 → 11:56); raise
+`--max-age-seconds` or align the schedule, else runs exit 2.
+
+### `backtest.py`
+
+| Arg | Default | Description |
+|---|---|---|
+| `--data-dir` | `/data/missy-data` | Base dir (pools/positions default under it) |
+| `--pools-dir` / `--positions-dir` | `<data-dir>/pool_screens` etc. | Override scan dirs |
+| `--horizon` | `4` | Scans to look ahead |
+| `--width` | `200` | Would-be open range width in bins/ticks |
+| `--position-value-usd` | `100` | Synthetic position size |
+| `--entry-cost-bps` / `--exit-cost-bps` | `50` / `50` | Swap costs |
+| `--claim-cost-usd` | `0.02` | Flat claim cost per close |
+| `--bootstrap-samples` | `1000` | Bootstrap resamples |
+| `--seed` | `42` | Random seed |
+| `--dynamic` | — | Rolling history + adaptive thresholds + regime weights |
+| `--json` / `--detail` | — | JSON output / per-candidate rows |
+
+### `tuner.py`
+
+| Arg | Default | Description |
+|---|---|---|
+| `--data-dir` / `--pools-dir` | `/data/missy-data` etc. | Scan dirs |
+| `--horizon` / `--width` | `4` / `200` | Backtest horizon/width |
+| `--candidates` | `30` | Weight perturbations tried |
+| `--seed` | `42` | Random seed |
+| `--train-frac` | `0.8` | Train split (rest is validation) |
+| `--output` | `profiles.tuned.json` | Search output |
+| `--apply` | — | Overwrite `profiles.json` (with backup) |
+
+## Constants (config: `constants`)
+
+| Key | Default | Description |
+|---|---|---|
+| `depth_min_usd` / `depth_max_usd` | 50k / 5M | Depth log-scale bounds |
+| `depeg_zero_dist` | 0.005 | Stable depeg zero-credit distance |
+| `stale_grace_days` / `stale_zero_days` | 30 / 120 | Staleness erosion window |
+| `collect_min_usd` | 5.0 | Min fee USD to trigger collection |
+| `collect_pct_of_value` | 0.01 | Fee/value share to trigger collection |
+| `turnover_max` | 5.0 | Turnover window multiple that maxes the component |
+| `unknown_credit` | 0.5 | Credit fraction for unknown inputs |
+| `il_zero_pct` | 10.0 | IL% that zeroes il_risk |
+| `il_conc_full_width_ticks` | 2000 | Reference range width for conc = 1 |
+| `il_conc_max` | 4.0 | Max concentration multiplier |
+| `fee_expect_max_days` | 30.0 | Cap on days used in fee expectation |
+| `il_vol_window_days` | 1.0 | Present in `profiles.json` but currently unread by code |
+
+Strategy rails live in `sheldon_policy.json` (via `strategy.get_policy()`):
+`min_position_usd` 20, `default_max_position_usd` 100,
+`max_opens_per_cycle` 3, `min_open_score` 70, `allowed_bin_steps` [4,10,20,25,50,100],
+`min_fee_tvl_ratio` 0.05, `max_volatility_pct` 50, `max_turnover_ratio` 50,
+`default_max_slippage_bps` 100, windows `00:00-23:59` + `Asia/Shanghai`,
+`add_policy` (enabled, idle_max 20, min_add 5, cooldown 6h, max/day 6,
+y_side_room 25%, max_wallet_scan_age 900). Adaptive widths:
+`WIDTH_FACTOR` 0.5, `MIN_HALF_WIDTH` 10, `MAX_HALF_WIDTH` 1000,
+Meteora max 70 bins inclusive (from George `execution_limits.json`).
+`SUPPORTED_DEXES` {meteora, raydium, orca}.
+
+Dynamic knobs (config: `dynamic`): rolling percentiles (`blend_alpha`,
+`min_samples` — `profiles.json` ships 10, code default 20), regime shifts,
+adaptive-threshold quantiles (floor `max(floor_open, policy min_open_score)`),
+expected-PnL override (1d horizon, 50bps entry/exit, $0.02 claim, $0.01 margin).
+
+Universe note: scoring enforces `lp_scoring.STABLECOINS/HIGH_CAPS`
+(`USDC,USDT,PYUSD,USDG` + `SOL,WSOL,WBTC,CBBTC,WETH,ETH,JSOL,MSOL,BSOL,ZEC`);
+`sheldon_policy.json:universe` is wider — the scoring lists win.
+
+## Tests
+
+```bash
+python3 -m unittest test_lp_scoring test_run_cycle test_dynamic test_idle_sweep test_range_state
+```
+
+Covers config validation, classification, every pool/position component,
+estimation math, the open/close data-quality rule, end-to-end cycles on
+synthetic scans, and the dynamic calibration layer.
+
+## Pool-to-George Pipeline (Missy → George open_position)
+
+This scheme documents the end-to-end flow of how Missy pool scans become
+George-schema `open` signals.
+
+### Overview
+
+```mermaid
+flowchart TD
+    P[Missy Pool Scan] --> S[score_pool_missy]
+    S --> V[Verdict: OPEN_CANDIDATE/WATCH/IGNORE]
+    V -->|OPEN_CANDIDATE| F[_filter_open_candidates]
+    F -->|Pass| B[build_strategies]
+    B -->|Top 20 by score| R[_build_open_signal]
+    R -->|Signal JSON| G[George pending queue]
+```
+
+### Gates Passed (9 gates in order)
+
+| # | Gate | Location | Pass Condition |
+|---|------|----------|----------------|
+| 1 | Trading window | `run_cycle.py:130` | Current Asia/Shanghai time inside `open_window_utc` |
+| 2 | Dedup | `run_cycle.py:143` | Pool not in active_positions (dedup) |
+| 3 | Duplicate scan | `run_cycle.py:147` | First candidate kept, rest skipped |
+| 4 | Range center | `run_cycle.py:152` | `active_bin_id` / `current_tick` known (not None) |
+| 5 | Missy eligibility | `run_cycle.py:159` | `pool.get("eligible")` is not False |
+| 6 | Legacy TVL | `run_cycle.py:167` | tvl >= 25,000 (when eligible is None) |
+| 7 | Legacy volume | `run_cycle.py:172` | volume_window >= 5,000 (when eligible is None) |
+| 8 | Bin step allowed | `run_cycle.py:177` | bin_step ∈ {10,20,25,50,100} for Meteora |
+| 9 | Score threshold | `run_cycle.py:182` | score >= 70.0 (min_open_score) |
+
+### Key Indicators Checked
+
+- `pool.eligible` – Missy's eligibility flag (Phase 2 gate)
+- `pool.tvl` – Total Value Locked (legacy gate: >= 25,000 USD)
+- `pool.volume_window` – 24h volume (legacy gate: >= 5,000 USD)
+- `pool.bin_step` – Meteora bin step; must be in allowed set
+- `pool.active_bin_id` / `current_tick` / `current_tick_index` – Current tick/bin
+- `pool.score` – Missy's pool score (>= 70.0 to open)
+- `pool.volatility` – 7-day volatility percent
+- `pool.token_x_price_usd`, `pool.token_y_price_usd` – Token prices USD
+- `pool.token_x_decimals`, `pool.token_y_decimals` – Token decimals
+
+### Capital Used
+
+- **MIN_POSITION_USD** = $20 (minimum per position, from `sheldon_policy.json`)
+- **Suggested position** = min(deployable_usdc × 0.75, $100) (75% of deployable, capped)
+- **50/50 USD split** between token X and token Y
+- **Amount calculation**: `amount_x = (half_usd / px_x) × 10^dec_x`, same for Y
+- **Max opens per cycle** = 20 (from `max_opens_per_cycle` in policy; strategy keeps top 3 by score)
+
+### Range Calculation
+
+- **Center**: `active_bin_id` (Meteora) or `current_tick`/`current_tick_index` (Raydium/Orca)
+- **Adaptive half-width**: `adaptive_half_width(pool)` using volatility and bin_step
+  - Meteora: `step_ratio = 1 + bin_step/10000`
+  - Raydium/Orca: `step_ratio = 1.0001^tick_spacing`
+  - `half_width = clamp(ceil(log(1 + f) / log(step_ratio)), MIN=10, MAX=max_half_width)`
+- **Max Meteora range**: 70 bins inclusive → `MAX_HALF_WIDTH = (70-1)//2 = 34`
+- **Range**: `lower = center - half_width`, `upper = center + half_width`
+- **Width constraint**: `upper - lower + 1 <= 70` bins (George executor rail)
+
+### Data Quality Tracking
+
+Each position result carries:
+
+```json
+"data_quality": {
+  "unknown_components": ["fee_capture", "il_risk"],
+  "policy_close": false
+}
+```
+
+`policy_close: true` marks the off-universe hard gate. Consumers (dashboards,
+George) can distinguish "bad position" from "bad data".
+
+**NEW: position_features v1 and cross-model decisions** (see `scoring/position/score.py`).
+
+- **Missy owns the feature vector**: `position_features` version 1 carries facts +
+  `gaps`; no verdict is embedded. Sheldon owns policy: weights, thresholds,
+  verdicts. Only the *inputs* come from Missy's features; gaps surface as
+  `unknown_components` and cap the verdict at REVIEW (fail-closed).
+- **Gates**: `status == "unknown"` → skip. `gaps` contains `value_unknown` or
+  `fees_unknown` → mark UNVERIFIABLE, do not close/reopen on APR alone.
+- **Cross-model**: Position scoring now carries `new_fc_score`, `new_fc_components`,
+  `new_fc_verdict`, and `cross_model` from the fee-capture model (see Pool LP
+  Opportunity Score section). `cross_model` notes agreement (`both open
+  (agreement)`) or disagreement (`missy=open new_fc=ignore`). This does not
+  replace the position health score but aids rotation timing and diagnostics.
+- **Range-risk comparable cross-DEX**: `edge_distance_frac` + `bins_to_lower/upper`
+  normalize Meteora bins and Orca/Raydium ticks into one geometry, so one rule
+  works for DLMM + Whirlpool + CLMM.
+- **Realized vs projected yield**: `fees_apr_pct` (what this position actually
+  earned) vs `pool_realized_fee_apr` (what the pool paid) exposes mis-positioned
+  ranges even when pool APR looks high.
+- **Side-drift / IL early warning**: `side_bias_x` + `single_sided` shows when a
+  position has gone 100% one token (out-of-range), before value collapses.
+- **Auditability**: `version` + `gaps` + `pending_fees_source` (`computed` vs
+  `raw_checkpoint` vs `raw_per_bin_sum`) tells exactly how much to trust each
+  dollar figure.
+
+## Signal Schema for George
+
+```json
+{
+  "signal_id": "sheldon-1725672345-1",
+  "action": "open",
+  "dex": "meteora",
+  "wallet_id": "main",
+  "pool_address": "SOL-USDC pool addr",
+  "side": "bidirectional",
+  "bin_range": {"lower": -45, "upper": 25},
+  "liquidity": {"amount_x": "50000000000", "amount_y": "50000000000"},
+  "position_usd": 85.50,
+  "score": 82.3,
+  "score_policy": {"source": "missy", "version": 1, "min_open_score": 70.0},
+  "max_slippage_bps": 100,
+  "reason": "OPEN score=82.3 threshold=70.0 dex=meteora position_usd=85.50 center=1000"
+}
+```

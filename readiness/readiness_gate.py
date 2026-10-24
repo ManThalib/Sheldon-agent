@@ -299,6 +299,8 @@ def build_readiness(
 
     wallet_fresh = _fresh(wallet_mtime, rp["max_wallet_scan_age_seconds"], now) \
         if rp["require_fresh_wallet_scan"] else True
+    wallet_ff = freshness_factor(wallet_mtime, rp["max_wallet_scan_age_seconds"], now) \
+        if rp["require_fresh_wallet_scan"] else 1.0
     position_fresh = _fresh(position_mtime, rp["max_position_scan_age_seconds"], now) \
         if rp["require_fresh_position_scan"] else True
     close_ok = bool(close_settled) if rp["require_close_settlement"] else True
@@ -370,6 +372,7 @@ def build_readiness(
             "sol_lamports": avail_sol,
         },
         "sol_is_pool_token": pool_sol_token(pool),
+        "wallet_freshness_factor": wallet_ff,
     }
 
 def _fresh(mtime: float, max_age_seconds: float, now: float) -> bool:
@@ -381,6 +384,30 @@ def _fresh(mtime: float, max_age_seconds: float, now: float) -> bool:
     if mtime <= 0:
         return False
     return (now - mtime) <= float(max_age_seconds)
+
+
+def freshness_factor(mtime: float, max_age_seconds: float, now: float) -> float:
+    """Return a freshness factor in [0.0, 1.0].
+
+    - 1.0: scan is fresh (within grace period)
+    - 0.0: scan is too old (beyond max age), hard block
+    - Between: proportional soft penalty - the scan is acceptable but
+      positions will be proportionally smaller to reflect the risk.
+    """
+    try:
+        mtime = float(mtime)
+    except (TypeError, ValueError):
+        return 0.0
+    if mtime <= 0:
+        return 0.0
+    age = now - mtime
+    if age <= 0:
+        return 1.0
+    max_age = float(max_age_seconds)
+    if age >= max_age:
+        return 0.0
+    # Proportional factor: 1.0 at 0 age, 0.0 at max age
+    return max(0.0, 1.0 - age / max_age)
 
 def _stale_reason(label: str, mtime: float, now: float, max_age: float) -> str:
     if not mtime:

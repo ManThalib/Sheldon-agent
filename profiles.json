@@ -1,5 +1,6 @@
 {
-  "_comment": "Sheldon scoring configuration. Loaded at startup; invalid file = fatal error (fail-closed). Delete a key to fall back to the built-in default. Weights must sum to 100 per profile.",
+  "_comment": "Sheldon scoring configuration. Loaded at startup; invalid file = fatal error (fail-closed). Delete a key to fall back to the built-in default. Weights must sum to 100 per profile. Version tracking for A/B testing and rollback.",
+  "version": 2,
   "pool_profiles": {
     "stable_stable": {
       "weights": {
