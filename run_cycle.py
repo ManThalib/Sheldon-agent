@@ -22,6 +22,7 @@ from typing import Optional, Dict, Any
 
 import lp_scoring
 import range_state
+import recenter
 from capital import DUST_MIN_USD, USDC_MINT
 from idle_sweep import execute_sweep, load_add_state, plan_sweep
 from readiness import (
@@ -322,6 +323,33 @@ def main() -> int:
             for addr, rec in sorted(oor_state.items())
         },
     }
+
+    # ----- Recenter trigger (active-bin drift) ---------------------------
+    # An in-range HOLD/COLLECT_FEES position whose active bin has drifted
+    # toward the range edge, trending in the drift direction, past cooldown
+    # and hold floors, with known value + composition, becomes a RECENTER
+    # verdict: George closes the position and reopens the same pool with the
+    # adaptive range centered on the active bin. OOR positions stay owned by
+    # the close rail above; unknown data never fires (fail closed).
+    _recenter_policy = recenter.merged_policy(
+        (_POLICY.get("recenter_policy") or {}),
+        min_hold_hours_default=_POLICY.get("min_hold_hours"),
+    )
+    report["recenter"] = {"policy_enabled": bool(
+        (_POLICY.get("recenter_policy") or {}).get("enabled"))}
+    if (_POLICY.get("recenter_policy") or {}).get("enabled"):
+        rec_state = recenter.load_state(args.state_dir)
+        rec_state = recenter.update_history(
+            list(active_positions.values()), rec_state, now=time.time(),
+            sample_gap_seconds=_recenter_policy["sample_gap_seconds"])
+        recenter.save_state(rec_state, args.state_dir)
+        rec_pools = {
+            ps.get("pool_address"): (ps.get("_pool") or {})
+            for ps in report.get("pool_scores", []) if ps.get("pool_address")
+        }
+        report["recenter"]["notes"] = recenter.apply_recenter_verdicts(
+            report.get("verdicts", []), active_positions, rec_pools,
+            rec_state, _recenter_policy, now=time.time())
 
     # ----- Rotation detection ------------------------------------------------
     # After out-of-range grace, check if any position should be rotated to a
@@ -863,6 +891,23 @@ def main() -> int:
         if emitted_closes:
             cs = report.setdefault("close_settlement", {})
             cs["emitted"] = emitted_closes
+        # Recenter cooldowns/daily caps record only for signals actually
+        # written — a suppressed emission never burns the pool's cooldown.
+        emitted_recenters = []
+        for path in signals_created:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    emitted = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if emitted.get("action") == "recenter":
+                emitted_recenters.append(emitted)
+        if emitted_recenters:
+            rec_state = recenter.load_state(args.state_dir)
+            recenter.record_emitted(rec_state, emitted_recenters, now=time.time())
+            recenter.save_state(rec_state, args.state_dir)
+            report["recenter"]["emitted"] = [
+                s.get("signal_id") for s in emitted_recenters]
         unemitted = _release_unemitted_rotations(
             rotations, cycle_day=_utc_oday())
         rotation_review.extend(unemitted)

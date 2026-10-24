@@ -90,6 +90,10 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     policy["reopen_cooldown_seconds"] = float(
         data.get("reopen_cooldown_seconds", 2700.0))
 
+    # Phase 2 strategy selection config (2026-10-23). Regime-based
+    # Spot/Curve/BidAsk selector consumes these parameters.
+    policy["strategy_config"] = dict(data.get("strategy_config") or {})
+
     return policy
 
 

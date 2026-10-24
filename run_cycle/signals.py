@@ -92,6 +92,7 @@ def _build_open_signal(strategy: dict, v: dict, pool: dict, idx: int, base: int,
             "amount_y": str(amount_y),
         },
         "position_usd": position_usd,
+        "strategy_type": strategy.get("strategy_type", "Spot"),
         "score": float(score),
         "score_policy": {"source": "missy", "version": 1, "min_open_score": min_score},
         "max_slippage_bps": 100,
@@ -313,12 +314,14 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                     "reason": "OPEN candidate; could not build signal (missing enrichment)",
                 })
                 continue
-        elif action in {"CLOSE", "REBALANCE", "COLLECT_FEES", "ROTATE"}:
+        elif action in {"CLOSE", "REBALANCE", "COLLECT_FEES", "ROTATE", "RECENTER"}:
             # Live-fire bug #6 gate (2026-10-10): never re-emit a close or
             # claim for a position George already closed recently — the
             # settlement state can miss a manual/out-of-band close, and the
             # position scan can lag. A duplicate only produces a failed
             # "Position not found" dispatch; surface a review item instead.
+            # RECENTER shares the gate: its first leg IS a close of the same
+            # position, so every close-family guard applies to it unchanged.
             pos_id = str(v.get("position") or "")
             already_closed = (
                 (pos_id and pos_id in recent_close_ids)
@@ -336,7 +339,7 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 })
                 continue
             # Duplicate-close ghost guards (2026-10-16): close family only.
-            if action in {"CLOSE", "REBALANCE", "ROTATE"}:
+            if action in {"CLOSE", "REBALANCE", "ROTATE", "RECENTER"}:
                 suppress = close_global_reason or close_pool_reasons.get(pool_addr)
                 if suppress:
                     review.append({
@@ -372,6 +375,11 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                     f"target={v.get('candidate_pool_address')}; "
                     f"evidence={json.dumps(v.get('evidence'))}"
                 )
+            elif action == "RECENTER":
+                sig_reason = (
+                    f"RECENTER score={v.get('score')}; "
+                    f"{v.get('recenter_reason')}"
+                )
             else:
                 sig_reason = (
                     f"{action} score={v.get('score')}; "
@@ -379,7 +387,9 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 )
             signal = {
                 "signal_id": f"sheldon-{base}-{idx}",
-                "action": "claim_fees" if action == "COLLECT_FEES" else "close",
+                "action": ("claim_fees" if action == "COLLECT_FEES"
+                           else "recenter" if action == "RECENTER"
+                           else "close"),
                 "dex": dex,
                 "wallet_id": v.get("wallet_id") or "main",
                 "pool_address": pool_addr,
@@ -391,6 +401,34 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                 "reason": sig_reason,
                 "created_at": _utc_iso(),
             }
+            if action == "RECENTER":
+                # George's validator requires position_id, bin_range,
+                # liquidity, position_usd on a recenter. The verdict carries
+                # the reopen payload computed by the trigger; a missing piece
+                # demotes to review instead of emitting a signal that would
+                # be rejected downstream.
+                rng = v.get("recenter_bin_range") or {}
+                liq = v.get("recenter_liquidity") or {}
+                usd = v.get("recenter_position_usd")
+                if not (rng.get("lower") is not None and rng.get("upper") is not None
+                        and liq.get("amount_x") and liq.get("amount_y")
+                        and isinstance(usd, (int, float)) and usd > 0):
+                    review.append({
+                        "pool_address": pool_addr,
+                        "dex": dex,
+                        "score": v.get("score"),
+                        "evidence": v.get("evidence"),
+                        "reason": ("RECENTER demoted: incomplete reopen payload "
+                                   "(bin_range/liquidity/position_usd)"),
+                    })
+                    continue
+                signal["bin_range"] = {"lower": int(rng["lower"]),
+                                       "upper": int(rng["upper"])}
+                signal["liquidity"] = {"amount_x": str(liq["amount_x"]),
+                                       "amount_y": str(liq["amount_y"])}
+                signal["position_usd"] = float(usd)
+                signal["strategy_type"] = "Spot"
+                signal["recenter_reason"] = v.get("recenter_reason")
             if action != "COLLECT_FEES":
                 repaired = _repair_close_position_id(signal, v, positions_dir)
                 if repaired is None:

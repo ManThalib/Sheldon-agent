@@ -107,10 +107,32 @@
     "dry_run_chain_truth_reconciliation": true,
     "_dry_run_chain_truth_comment": "Owner-approved 2026-10-19. dry_run only: resolve a close that was emitted but never executed when the position account is provably absent at confirmed AND finalized while its pool account still resolves. Live modes ignore this flag entirely - the journal ladder is the sole authority there."
   },
+  "recenter_policy": {
+    "_comment": "Phase: active-bin drift recenter (2026-10-23). An in-range position fires a recenter (close + reopen in the same pool, new range centered on the active bin) when drift >= max(min_drift_bins, drift_frac_of_half_width * half_width), the position is older than min_hold_hours (falls back to the top-level min_hold_hours), the pool cooldown has elapsed, the recent active-bin trend matches the drift direction, the per-pool daily cap allows it, and value + composition are known (fail closed on unknown data). Cooldowns/daily counters record only when a signal is actually written. OOR positions stay owned by the close rail.",
+    "enabled": true,
+    "drift_frac_of_half_width": 0.6,
+    "min_drift_bins": 8,
+    "cooldown_hours": 6.0,
+    "trend_confirm_scans": 3,
+    "trend_min_span_seconds": 1800,
+    "sample_gap_seconds": 600,
+    "max_recenters_per_pool_per_day": 2,
+    "amount_haircut_pct": 2.0
+  },
   "range": {
     "_comment": "Volatility-adaptive range width (strategy/range). width_factor: cover +/- volatility*width_factor per side. min_half_width: absolute floor in bins (Meteora) / raw 1bp ticks (Orca, Raydium). min_half_fraction: floor as a price fraction per side (0.01 = +/-1%) so the floor means the same price width on every DEX/tick-spacing; added 2026-10-14 after the Czfq3xZZ SOL-USDC incident where the tick-count floor let a ts=4 Whirlpool open at +/-0.1% and hit its edge in 45 minutes.",
     "width_factor": 0.5,
     "min_half_width": 10,
     "min_half_fraction": 0.01
+  },
+  "strategy_config": {
+    "_comment": "Phase 2 strategy selection (2026-10-23). Regime-based selector chooses Spot/Curve/BidAsk per signal. min_tvl_usd: pools below this TVL only get Spot. trend_threshold: abs active-bin drift (bins) counting as trending. vol_threshold_pct: volatility percentile above which Curve/BidAsk are favoured. high_score_threshold: score above which Curve/BidAsk unlock. curve_half_width_bins: half-width for Curve ranges. bidask_gap_bins: gap between bid_range.upper and ask_range.lower. bidask_half_width_bins: half-width for each BidAsk side.",
+    "min_tvl_usd": 50000.0,
+    "trend_threshold": 8,
+    "vol_threshold_pct": 75.0,
+    "high_score_threshold": 90.0,
+    "curve_half_width_bins": 20,
+    "bidask_gap_bins": 4,
+    "bidask_half_width_bins": 10
   }
 }
