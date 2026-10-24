@@ -265,7 +265,7 @@ def main() -> int:
 
     # Versioned scoring identity: which policy produced this cycle's verdicts.
     report["scoring_policy"] = scoring_policy()
-    report["scoring_profile_version"] = scoring_profile()
+    report["scoring_profile_version"] = lp_scoring.scoring_profile_version()
 
     # Load rotation state persist across cycles
     rot_state = _load_rotation_state(args.state_dir)

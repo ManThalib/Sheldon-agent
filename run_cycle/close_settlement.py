@@ -841,6 +841,7 @@ def check_settlement(active_positions: Dict[str, Any],
                      policy: Optional[Dict[str, Any]] = None,
                      journal_dir: Optional[str] = None,
                      max_scan_age_seconds: float = 900.0,
+                     close_ttl_seconds: float = UNKNOWN_TTL_SECONDS,
                      mode: Optional[str] = None,
                      chain_rpc_url: Optional[str] = None,
                      chain_check: Any = None,
@@ -869,7 +870,8 @@ def check_settlement(active_positions: Dict[str, Any],
                                 <= max_scan_age_seconds)
     advance(state, active_positions, wallet_mtime,
             position_mtime, now=now, policy=policy,
-            max_scan_age_seconds=max_scan_age_seconds)
+            max_scan_age_seconds=max_scan_age_seconds,
+            close_ttl_seconds=close_ttl_seconds)
     # Re-derive rejected classifications AFTER the advance so a pool that
     # settled this same cycle already counts as prior-settled evidence.
     derive_rejected_statuses(state, position_presence,
