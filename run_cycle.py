@@ -744,6 +744,58 @@ def main() -> int:
                            + ((r or {}).get("status") or "no readiness object")
                            + (f" ({reasons})" if reasons else "")),
             })
+    # Capital allocation across ready strategies.
+    # build_strategies() sizes every candidate as if it were the only open
+    # (75% of deployable), so two ready candidates each claim the full budget
+    # and the second open cannot be funded. Split the deployable stablecoin
+    # budget across the candidates instead: fund as many opens as the minimum
+    # allows, best score first, share the budget evenly, and never exceed the
+    # per-strategy cap. A strategy that the split cannot fund is a review item,
+    # not a silent overspend.
+    if ready_strategies:
+        budget = float((report.get("capital_plan") or {}).get("deployable_usdc") or 0.0)
+        if budget <= 0:
+            budget = float((report.get("wallet") or {}).get("deployable_usdc") or 0.0)
+        funded = sorted(ready_strategies,
+                        key=lambda s: s.get("score") or 0.0, reverse=True)
+        opens_allowed = int(budget // MIN_POSITION_USD) if budget > 0 else 0
+        if opens_allowed < len(funded):
+            for strategy in funded[opens_allowed:]:
+                open_skipped.append({
+                    "pool_address": strategy.get("pool_address"),
+                    "dex": strategy.get("dex"),
+                    "score": strategy.get("score"),
+                    "reason": (f"capital split: deployable ${budget:.2f} funds "
+                               f"{opens_allowed} open(s) at min_position_usd "
+                               f"${MIN_POSITION_USD:.2f}"),
+                })
+            funded = funded[:opens_allowed]
+        if funded:
+            share = budget / len(funded)
+            allocated = []
+            for strategy in funded:
+                amount = min(float(strategy.get("suggested_usdc") or 0.0), share)
+                if amount < MIN_POSITION_USD:
+                    open_skipped.append({
+                        "pool_address": strategy.get("pool_address"),
+                        "dex": strategy.get("dex"),
+                        "score": strategy.get("score"),
+                        "reason": (f"capital split: share ${amount:.2f} below "
+                                   f"min_position_usd ${MIN_POSITION_USD:.2f}"),
+                    })
+                    continue
+                strategy["suggested_usdc"] = int(amount * 100) / 100  # never round up past the budget
+                allocated.append(strategy)
+            ready_strategies = allocated
+        else:
+            if budget > 0 and opens_allowed < 1:
+                open_skipped.append({
+                    "pool_address": None, "dex": "any", "score": None,
+                    "reason": (f"capital split: deployable ${budget:.2f} below "
+                               f"min_position_usd ${MIN_POSITION_USD:.2f}"),
+                })
+            ready_strategies = []
+
     report["strategies"] = ready_strategies
     report["open_skipped"] = open_skipped
 
