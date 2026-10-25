@@ -95,7 +95,9 @@
     "auto_top_up_source_mint": "USDC",
     "max_top_up_usd": 10,
     "top_up_buffer_pct": 20,
-    "min_post_top_up_lamports": 20000000
+    "min_post_top_up_lamports": 20000000,
+    "_swappable_comment": "Owner ruling 2026-10-25: idle SOL above reserve_lamports is deployable capital (it is the pipeline's X-side asset; plan_funding converts it when an open needs the stable side).",
+    "swappable_haircut": 0.98
   },
   "rotation": {
     "_comment": "Phase 2 (2026-10-09): rotation open requires close + position + wallet + token + SOL confirmation. Declared here; enforcement lands in Phase 2.",

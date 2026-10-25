@@ -11,7 +11,7 @@ Dependencies (all from strategy package):
 
 from typing import Any, List, Dict
 from strategy.sheldon_policy import MAX_POSITION_OPEN_PER_CYCLE, get_policy
-from strategy.position_sizing import open_eligible, suggested_position_usd
+from strategy.position_sizing import open_eligible, suggested_position_usd, deployable_capital_usd
 from strategy.range._7d_volatility_based import _range_center, adaptive_half_width
 from strategy.sheldon_selector import select_strategy
 
@@ -27,7 +27,7 @@ def build_strategies(open_candidates: List[Dict[str, Any]],
     if not open_eligible(wallet):
         return []
 
-    deployable = float(wallet.get("deployable_usdc") or 0.0)
+    deployable = deployable_capital_usd(wallet)
     size = suggested_position_usd(deployable)
 
     # Sort by pool score descending so the best candidates are selected.

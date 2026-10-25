@@ -116,6 +116,11 @@ _LIMITS = _load_execution_limits()
 MIN_POSITION_USD: float = _POLICY["min_position_usd"]
 DEFAULT_MAX_POSITION_USD: float = _POLICY["default_max_position_usd"]
 MAX_POSITION_OPEN_PER_CYCLE: int = _POLICY["max_opens_per_cycle"]
+# Owner ruling 2026-10-25: swappable idle SOL. Reserve is the SAME value
+# readiness already passes to sol_overhead_lamports() (60M calibrated worst
+# case), so sizing and funding can never disagree about the reserve.
+SOL_RESERVE_LAMPORTS: int = int((_POLICY.get("sol") or {}).get("reserve_lamports", 60_000_000))
+SWAPPABLE_SOL_HAIRCUT: float = float((_POLICY.get("sol") or {}).get("swappable_haircut", 0.98))
 
 # Single source: strategy/bin_step_rail.py (owner ruling 2026-10-19).
 # Derived from the same rule the predicate uses, so this set can never
