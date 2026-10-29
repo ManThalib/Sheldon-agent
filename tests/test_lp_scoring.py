@@ -11,10 +11,12 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lp_scoring
+import pool_features
 from lp_scoring import (
     ConfigError,
     classify_pair,
@@ -494,6 +496,87 @@ class RunCycleTests(unittest.TestCase):
         # depeg_exposure unknown due to missing price data in pool
         self.assertEqual(ps["verdict"], "REVIEW")
         self.assertIn("depeg_exposure", ps["data_quality"]["unknown_components"])
+
+
+
+class PoolFeaturesV1ScoreTests(unittest.TestCase):
+    """score_pool_missy consumes the v1 safety gate when the flag is on."""
+
+    GATE = {"version": 1, "enabled": True, "require_range_ready": True}
+
+    def _pool(self, addr, score, eligible=True, reject=None):
+        return {
+            "pool_features_version": 1,
+            "name": "SOL-USDC", "pool_address": addr, "dex": "orca",
+            "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+            "score": score, "eligible": eligible,
+            "pair_class": "stable_bluechip",
+            "rejected_reason": ", ".join(reject or []),
+            "safety": {"eligible": eligible,
+                       "reject_codes": list(reject or []),
+                       "thresholds_used": {"policy_version": 2}},
+            "data_quality": {"range_ready": True, "complete": True,
+                             "missing": []},
+            "fee_capture": {"realized_fee_apr": 100.0},
+            "expected_in_range_frac": 0.5,
+            "expected_in_range": {"vol_daily_pct": 2.0,
+                                  "reference_half_width_pct": 1.0,
+                                  "horizon_days": 3.0},
+            "il_estimate_pct": 0.1,
+            "slippage_estimate_bps": {"100": 0.0, "1000": 0.0},
+        }
+
+    def test_v1_gate_reads_safety_not_score(self):
+        with patch.object(pool_features, "gate_policy", return_value=self.GATE):
+            open_low = score_pool_missy(self._pool("LOW", 40.0))
+            reject_high = score_pool_missy(
+                self._pool("HIGH", 99.0, eligible=False, reject=["low_tvl"]))
+        self.assertEqual(open_low["verdict"], "OPEN_CANDIDATE")
+        self.assertEqual(open_low["score"], 40.0)
+        self.assertEqual(open_low["dynamic"]["thresholds"], "safety")
+        self.assertEqual(reject_high["verdict"], "IGNORE")
+        self.assertEqual(reject_high["score"], 99.0)
+        self.assertIn("low_tvl", reject_high["reason"])
+
+    def test_v0_record_keeps_legacy_score_verdict(self):
+        pool = {"name": "SOL-USDC", "pool_address": "V0", "dex": "orca",
+                "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+                "score": 60.0}
+        result = score_pool_missy(pool)
+        self.assertEqual(result["verdict"], "WATCH")
+
+    def test_run_cycle_v0_regression_only_high_score_opens(self):
+        root = tempfile.mkdtemp()
+        try:
+            pools_dir = os.path.join(root, "pools")
+            pos_dir = os.path.join(root, "positions")
+            os.makedirs(pools_dir)
+            os.makedirs(pos_dir)
+            pools = [
+                {"name": "SOL-USDC", "pool_address": "LOW", "dex": "orca",
+                 "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+                 "score": 40.0, "tvl": 500_000.0,
+                 "volume_window": 2_000_000.0, "current_tick_index": 100},
+                {"name": "SOL-USDC", "pool_address": "HIGH", "dex": "orca",
+                 "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+                 "score": 95.0, "tvl": 500_000.0,
+                 "volume_window": 2_000_000.0, "current_tick_index": 100},
+            ]
+            scan = os.path.join(pools_dir, "pool_scan-x.json")
+            with open(scan, "w") as fh:
+                json.dump(pools, fh)
+            now = time.time()
+            os.utime(scan, (now, now))
+            pos = os.path.join(pos_dir, "position_scan-x.json")
+            with open(pos, "w") as fh:
+                json.dump({"positions": []}, fh)
+            os.utime(pos, (now, now))
+            report = run_cycle(pools_dir, pos_dir)
+            opens = {v["pool_address"] for v in report["verdicts"]
+                     if v["action"] == "OPEN_CANDIDATE"}
+            self.assertEqual(opens, {"HIGH"})
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

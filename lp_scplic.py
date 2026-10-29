@@ -1,4 +1,10 @@
-"""Sheldon's LP scoring engine (v2).
+"""DEPRECATED MIRROR — lp_scplic.py is an old copy of lp_scoring.py.
+
+The live module is ``lp_scoring.py`` (imported by ``run_cycle.py`` and the
+backtest package).  This copy is kept only for historical reference and is
+NOT part of the v1 gate/ranker path; do not wire new code to it.
+
+Sheldon's LP scoring engine (v2).
 
 Deterministic scoring for LP positions on Meteora DLMM, Raydium CLMM, and
 Orca Whirlpool. Universe policy: stablecoin and high-cap pairs only — no

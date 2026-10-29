@@ -1,12 +1,41 @@
 {
   "_comment": "Sheldon policy manifest. Strategy decisions live here. George enforces the matching execution rails from execution_limits.json.",
   "scoring": {
-    "_comment": "source: 'missy' consumes Missy's default pool score; 'local' re-runs Sheldon's own pool scoring (kept for backtesting). position_source: 'missy' scores positions from Missy's versioned position_features vector (policy stays Sheldon's); 'local' re-derives inputs from the raw position record. min_open_score raised 70->90, version 1->2 (owner default 2026-10-10, calibration item): 90 is ~p84 of the observed Missy score distribution (last 8 scans; open rate 91%->48% of eligible; local scorer equivalent ~16%).",
+    "_comment": "source: 'missy' consumes Missy's default pool score; 'local' re-runs Sheldon's own pool scoring (kept for backtesting). contract_version: 1 consumes Missy pool_features v1 when a record carries pool_features_version>=1 (behind the pool_gate/pool_ranker flags); 0 keeps the legacy score gate for every record. gate: 'safety' means the v1 open gate reads safety.eligible/range_ready, never score. position_source: 'missy' scores positions from Missy's versioned position_features vector (policy stays Sheldon's); 'local' re-derives inputs from the raw position record. min_open_score is legacy only: it is the v0 fallback and is never used for v1 records once the flags are on. Raised 70->90, version 1->2 (owner default 2026-10-10, calibration item): 90 is ~p84 of the observed Missy score distribution (last 8 scans; open rate 91%->48% of eligible; local scorer equivalent ~16%).",
     "source": "missy",
+    "contract_version": 1,
+    "gate": "safety",
     "min_open_score": 90.0,
     "version": 2,
     "position_source": "missy",
     "position_features_version": 1
+  },
+  "pool_gate": {
+    "_comment": "Missy pool_features v1 open gate. enabled=false keeps today's score gate for every record (Phase A). enabled=true gates v1 records on safety.eligible + data_quality.range_ready only; v0 records still use scoring.min_open_score and the legacy TVL/volume backstop. require_range_ready mirrors Missy's 'can this pool take a range at all?'. v0_fallback is documentation/audit only ('legacy').",
+    "version": 1,
+    "enabled": false,
+    "require_range_ready": true,
+    "v0_fallback": "legacy"
+  },
+  "pool_ranker": {
+    "_comment": "Expected net fee yield ranker for v1 records. enabled=false keeps build_strategies sorted by score (Phase A). enabled=true ranks survivors by net_daily_pct = realized_fee_apr/365*expected_in_range_frac - conc*vol^2/variance_divisor - round_trip_slippage/hold_days, ties broken deterministically by pool_address. il_estimate_pct is a guard (max_il_pct), never a subtractive term. unknown_rank controls records with null expected_in_range inputs: 'last' ranks them after every measured pool, 'skip' drops them. enforce_min_net is off by default (rank all survivors; let MAX_POSITION_OPEN_PER_CYCLE cut).",
+    "version": 1,
+    "enabled": false,
+    "hold_days": 3.0,
+    "variance_divisor": 800.0,
+    "max_il_pct": 5.0,
+    "il_policy": "skip",
+    "slippage": {
+      "round_trip": true,
+      "size_usd": 100
+    },
+    "high_net_daily_pct": 0.10,
+    "tie_break": "pool_address",
+    "concentration_min": 0.25,
+    "concentration_max": 4.0,
+    "unknown_rank": "last",
+    "min_net_daily_pct": 0.0,
+    "enforce_min_net": false
   },
   "universe": {
     "stablecoins": [
@@ -128,10 +157,11 @@
     "min_half_fraction": 0.01
   },
   "strategy_config": {
-    "_comment": "Phase 2 strategy selection (2026-10-23). Regime-based selector chooses Spot/Curve/BidAsk per signal. min_tvl_usd: pools below this TVL only get Spot. trend_threshold: abs active-bin drift (bins) counting as trending. vol_threshold_pct: volatility percentile above which Curve/BidAsk are favoured. high_score_threshold: score above which Curve/BidAsk unlock. curve_half_width_bins: half-width for Curve ranges. bidask_gap_bins: gap between bid_range.upper and ask_range.lower. bidask_half_width_bins: half-width for each BidAsk side.",
+    "_comment": "Phase 2 strategy selection (2026-10-23, v1 ranker 2026-10-29). Regime-based selector chooses Spot/Curve/BidAsk per signal. min_tvl_usd: pools below this TVL only get Spot. trend_threshold: abs active-bin drift (bins) counting as trending. vol_threshold_pct: volatility percentile above which Curve/BidAsk are favoured. high_net_daily_pct: v1 ranker input above which Curve/BidAsk unlock (net fee yield %/day). high_score_threshold: legacy v0 score threshold (kept for the contract_version:0 branch). curve_half_width_bins: half-width for Curve ranges. bidask_gap_bins: gap between bid_range.upper and ask_range.lower. bidask_half_width_bins: half-width for each BidAsk side.",
     "min_tvl_usd": 50000.0,
     "trend_threshold": 8,
     "vol_threshold_pct": 75.0,
+    "high_net_daily_pct": 0.10,
     "high_score_threshold": 90.0,
     "curve_half_width_bins": 20,
     "bidask_gap_bins": 4,

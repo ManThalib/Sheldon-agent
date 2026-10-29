@@ -90,6 +90,23 @@ class GateReportTests(unittest.TestCase):
             import shutil
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_v1_reject_codes_are_attributed(self):
+        root = tempfile.mkdtemp()
+        try:
+            v1 = _pool("V1", eligible=False)
+            v1["pool_features_version"] = 1
+            v1["safety"] = {"eligible": False,
+                            "reject_codes": ["low_tvl", "high_vol"]}
+            scan = _write_scan(os.path.join(root, "pool_scan-20261029.json"),
+                               [v1])
+            report = backtest.run_gate_report([scan])
+            self.assertEqual(report["missy_strict_count"], 1)
+            self.assertIn("low_tvl", report["missy_reject_reasons"])
+            self.assertIn("high_vol", report["missy_reject_reasons"])
+        finally:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

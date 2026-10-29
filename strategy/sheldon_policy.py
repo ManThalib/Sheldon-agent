@@ -43,7 +43,13 @@ def _load_sheldon_policy() -> Dict[str, Any]:
     scoring = data.get("scoring") or {}
     policy["scoring_source"] = str(scoring.get("source", "local")).lower()
     policy["scoring_version"] = int(scoring.get("version") or 1)
+    policy["scoring_contract_version"] = int(scoring.get("contract_version") or 0)
+    policy["scoring_gate"] = str(scoring.get("gate", "score")).lower()
     policy["min_open_score"] = float(scoring.get("min_open_score") or 70.0)
+
+    # Missy pool_features v1 consumption (both flags default false).
+    policy["pool_gate"] = dict(data.get("pool_gate") or {})
+    policy["pool_ranker"] = dict(data.get("pool_ranker") or {})
 
     pool = data.get("pool_eligibility") or {}
     # bin_step is a RULE, not a list (owner ruling 2026-10-19): every Meteora
@@ -130,14 +136,25 @@ ALLOWED_METEORA_BIN_STEPS: frozenset = _POLICY["allowed_bin_steps"]
 
 SCORING_SOURCE: str = _POLICY["scoring_source"]
 SCORING_VERSION: int = _POLICY["scoring_version"]
+SCORING_CONTRACT_VERSION: int = _POLICY["scoring_contract_version"]
 MIN_OPEN_SCORE: float = _POLICY["min_open_score"]
+POOL_GATE_ENABLED: bool = bool((_POLICY.get("pool_gate") or {}).get("enabled"))
+POOL_RANKER_ENABLED: bool = bool((_POLICY.get("pool_ranker") or {}).get("enabled"))
 
 
 def scoring_policy() -> Dict[str, Any]:
-    """Versioned scoring-policy identity for audit trails and signals."""
+    """Versioned scoring-policy identity for audit trails and signals.
+
+    ``contract_version`` / ``gate`` are additive report metadata: they record
+    whether this build consumes Missy pool_features v1 and which gate it
+    intends to use.  The pre-existing keys are unchanged; the signal schema
+    (``run_cycle/signals.py``) still emits its historical shape.
+    """
     return {
         "source": SCORING_SOURCE,
         "version": SCORING_VERSION,
+        "contract_version": SCORING_CONTRACT_VERSION,
+        "gate": _POLICY.get("scoring_gate", "score"),
         "min_open_score": MIN_OPEN_SCORE,
     }
 

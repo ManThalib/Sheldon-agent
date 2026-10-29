@@ -7,7 +7,9 @@ loaded from sheldon_policy.json `strategy_config`:
   - trend_threshold: absolute active-bin drift (bins) that counts as trending
   - vol_threshold_pct: volatility percentile threshold; above it Curve/BidAsk
     are favoured over Spot
-  - high_score_threshold: score above which Curve/BidAsk become available
+  - high_score_threshold: legacy v0 score above which Curve/BidAsk become available
+  - high_net_daily_pct: v1 expected net fee yield (%/day) above which
+    Curve/BidAsk become available
   - curve_half_width_bins: half-width (bins) for Curve ranges centred on active bin
   - bidask_gap_bins: gap between bid_range.upper and ask_range.lower
   - bidask_half_width_bins: half-width (bins) for each side of a BidAsk range
@@ -28,8 +30,14 @@ def select_strategy(
     volatility_pct: float,
     trend_sign: Optional[int],
     config: Dict[str, Any],
+    metric: str = "score",
 ) -> str:
     """Return one of "Spot", "Curve", "BidAsk".
+
+    ``metric="net_daily_pct"`` (v1 ranker path) compares the candidate's
+    expected net fee yield against ``high_net_daily_pct`` (default 0.10
+    %/day).  ``metric="score"`` keeps the legacy v0 path on
+    ``high_score_threshold``.  Volatility/trend logic is identical.
 
     Fail-closed: any missing or unusable input returns "Spot".
     """
@@ -65,11 +73,20 @@ def select_strategy(
     except (TypeError, ValueError):
         vol_threshold_pct = 0.0
 
-    high_score_threshold = config.get("high_score_threshold")
-    try:
-        high_score_threshold = float(high_score_threshold) if high_score_threshold is not None else 90.0
-    except (TypeError, ValueError):
-        high_score_threshold = 90.0
+    if metric == "net_daily_pct":
+        high_metric_threshold = config.get("high_net_daily_pct")
+        try:
+            high_metric_threshold = (float(high_metric_threshold)
+                                     if high_metric_threshold is not None else 0.10)
+        except (TypeError, ValueError):
+            high_metric_threshold = 0.10
+    else:
+        high_metric_threshold = config.get("high_score_threshold")
+        try:
+            high_metric_threshold = (float(high_metric_threshold)
+                                     if high_metric_threshold is not None else 90.0)
+        except (TypeError, ValueError):
+            high_metric_threshold = 90.0
 
     try:
         score = float(score)
@@ -81,8 +98,8 @@ def select_strategy(
     except (TypeError, ValueError):
         return "Spot"
 
-    # High volatility + high score → Curve or BidAsk depending on trend
-    if volatility_pct >= vol_threshold_pct and score >= high_score_threshold:
+    # High volatility + high metric → Curve or BidAsk depending on trend
+    if volatility_pct >= vol_threshold_pct and score >= high_metric_threshold:
         if trend_sign is not None and abs(trend_sign) >= trend_threshold:
             # Clear trend → Curve (centred on active bin, riding the trend)
             return "Curve"

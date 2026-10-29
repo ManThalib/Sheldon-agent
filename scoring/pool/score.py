@@ -146,105 +146,16 @@ def _missy_components(pool: dict) -> dict:
 
 
 def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
-    """Use Missy's default score directly, preserving local verdict thresholds.
+    """Deprecated mirror — route to the live ``lp_scoring`` implementation.
 
-    Falls back to Sheldon's local scoring when the pool record does not
-    yet contain a Missy score (legacy scans or tests).
-
-    Policy gates are NOT outsourced: the universe hard-gate applies here
-    exactly as in score_pool (a high Missy score never opens an
-    off-universe pool), and Missy's own eligible=false discovery gates
-    block OPEN_CANDIDATE (score kept for audit, verdict capped at IGNORE).
+    This copy used to ``from scoring.config import load_scoring_policy``
+    (an ImportError: the function lives in ``lp_scoring``).  It also kept a
+    stale new_fc cross-model gate that must never decide v1 entry.  Both
+    problems disappear by delegating: the live path in ``lp_scoring.py`` is
+    the single implementation, including the pool_features v1 safety gate.
     """
-    if "score" not in pool:
-        from scoring.pool.score import score_pool
-        return score_pool(pool, ctx)
-    # Missy owns classification; trust its tag when present, else local.
-    from scoring.universe import classify_pair
-    pair_class, sym_x, sym_y = classify_pair(pool)
-    if pool.get("pair_class"):
-        pair_class = pool["pair_class"]
-    score = float(pool.get("score") or 0.0)
-    from scoring.config import load_scoring_policy
-
-    policy = load_scoring_policy()
-
-    if pair_class in ("off_universe", "unknown"):
-        return {"pool": pool.get("name"), "pool_address": pool.get("pool_address"),
-                "dex": pool.get("dex"), "pair_class": pair_class,
-                "pair": [sym_x, sym_y], "score": 0.0, "components": {},
-                "reason": "off-universe pair: policy is stables/high-caps only",
-                "verdict": "IGNORE", "_pool": pool,
-                "score_policy": {"source": policy["source"],
-                                 "version": policy["version"]},
-                "dynamic": {"regime": None, "thresholds": "static"}}
-
-    thresholds = (ctx or {}).get("thresholds") or get_config()["pool_thresholds"]
-    verdict = pool_verdict(score, thresholds)
-    reasons = []
-    fee_tvl_ratio = float(pool.get("fee_tvl_ratio") or 0.0)
-
-    # Compute new_fc_score components for cross-model insight
-    new_fc = score_pool_new_fc(pool, ctx) if "tvl" in pool or "realized_fee_apr" in pool else None
-
-    if verdict == "OPEN_CANDIDATE" and pool.get("eligible") is False:
-        # Check new_fc fee_yield_score for nuanced reconsideration
-        fc_components = pool.get("new_fc_components", {})
-        fc_fee_yield = fc_components.get("fee_yield_score", 0) if fc_components else 0
-
-        if fc_fee_yield >= 30:  # strong fee yield despite low fee_tvl_ratio
-            # Partially reinstate: downgrade to WATCH with penalty note
-            verdict = "WATCH"
-            reasons.append(
-                f"score {score} >= open threshold but Missy gate rejected: "
-                f"{pool.get('rejected_reason') or 'eligible=false'} "
-                f"but new_fc fee_yield_score={fc_fee_yield:.1f} strong -> WATCH (fee efficiency ok)")
-        elif fc_fee_yield >= 15:
-            # Moderate fee yield - keep IGNORE but note the exception
-            verdict = "IGNORE"
-            reasons.append(
-                f"score {score} >= open threshold but Missy gate rejected: "
-                f"{pool.get('rejected_reason') or 'eligible=false'} "
-                f"new_fc fee_yield_score={fc_fee_yield:.1f} moderate")
-        else:
-            verdict = "IGNORE"
-            reasons.append(
-                f"score {score} >= open threshold but Missy gate rejected: "
-                f"{pool.get('rejected_reason') or 'eligible=false'} (fee_yield_score={fc_fee_yield:.1f} too low)")
-    elif verdict == "OPEN_CANDIDATE":
-        reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
-
-    base_result = {
-        "pool": pool.get("name"),
-        "pool_address": pool.get("pool_address"),
-        "dex": pool.get("dex"),
-        "pair_class": pair_class,
-        "pair": [sym_x, sym_y],
-        "score": score,
-        "components": _missy_components(pool),
-        "score_policy": {"source": policy["source"], "version": policy["version"]},
-        "reason": "; ".join(reasons) if reasons else "Missy default score consumed",
-        "verdict": verdict,
-        "_pool": pool,
-        "dynamic": {"regime": None, "thresholds": "static"},
-    }
-
-    if new_fc and new_fc.get("score") > 0:
-        base_result["new_fc_score"] = new_fc["score"]
-        base_result["new_fc_components"] = new_fc["components"]
-        base_result["new_fc_verdict"] = new_fc["verdict"]
-        # Cross-model: if both models agree, boost confidence; if they differ, note discrepancy
-        if verdict == new_fc["verdict"]:
-            base_result["cross_model"] = f"both {verdict.lower()} (agreement)"
-        else:
-            base_result["cross_model"] = f"missy={verdict.lower()} new_fc={new_fc['verdict'].lower()}"
-    else:
-        base_result["new_fc_score"] = None
-        base_result["new_fc_components"] = {}
-        base_result["new_fc_verdict"] = "IGNORE"
-        base_result["cross_model"] = "new_fc_not_computed"
-
-    return base_result
+    import lp_scoring
+    return lp_scoring.score_pool_missy(pool, ctx)
 
 
 def pool_verdict(score: float, thresholds: dict) -> str:

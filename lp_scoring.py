@@ -39,6 +39,7 @@ from typing import Any, Optional, Union
 
 from capital import summarize_wallet
 import dynamic
+import pool_features
 
 # --------------------------------------------------------------------------
 # Configuration — defaults mirror profiles.json. A valid profiles.json next
@@ -454,6 +455,8 @@ def load_scoring_policy() -> dict:
     return {
         "source": str(block.get("source", "local")).lower(),
         "version": int(block.get("version") or 0),
+        "contract_version": int(block.get("contract_version") or 0),
+        "gate": str(block.get("gate", "score")).lower(),
         "min_open_score": float(block.get("min_open_score") or 70.0),
         "position_source": str(block.get("position_source", "local")).lower(),
         "position_features_version": int(block.get("position_features_version") or 1),
@@ -478,15 +481,20 @@ def _missy_components(pool: dict) -> dict:
 
 
 def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
-    """Use Missy's default score directly, preserving local verdict thresholds.
+    """Use Missy's output to build Sheldon's pool verdict.
 
-    Falls back to Sheldon's local scoring when the pool record does not
-    yet contain a Missy score (legacy scans or tests).
+    v0 records (or any record while ``pool_gate.enabled`` is false) keep the
+    historical score rail: ``score`` vs the local OPEN/WATCH thresholds,
+    with an ``eligible=false`` veto.
 
-    Policy gates are NOT outsourced: the universe hard-gate applies here
-    exactly as in score_pool (a high Missy score never opens an
-    off-universe pool), and Missy's own eligible=false discovery gates
-    block OPEN_CANDIDATE (score kept for audit, verdict capped at IGNORE).
+    v1 records while ``pool_gate.enabled`` is true are gated on Missy's
+    safety block only (``safety.eligible`` + ``data_quality.range_ready``).
+    ``score`` is retained for audit but never decides.  The expected net fee
+    yield is attached as a diagnostic unless ``pool_ranker.enabled`` uses it
+    for ordering in ``build_strategies``.
+
+    The universe hard-gate applies in both paths: an off-universe pair can
+    never open, regardless of its score or safety block.
     """
     if "score" not in pool:
         return score_pool(pool, ctx)
@@ -507,17 +515,41 @@ def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
                                  "version": policy["version"]},
                 "dynamic": {"regime": None, "thresholds": "static"}}
 
+    gate_cfg = pool_features.gate_policy()
+    ranker_cfg = pool_features.ranker_policy()
+    v1_gate = pool_features.gate_active(pool, gate_cfg)
+    rank = (pool_features.compute_net_yield(pool, ranker_cfg)
+            if pool_features.is_v1(pool) else None)
+
     thresholds = (ctx or {}).get("thresholds") or get_config()["pool_thresholds"]
-    verdict = pool_verdict(score, thresholds)
     reasons = []
-    if verdict == "OPEN_CANDIDATE" and pool.get("eligible") is False:
-        verdict = "IGNORE"
-        reasons.append(
-            f"score {score} >= open threshold but Missy gate rejected: "
-            f"{pool.get('rejected_reason') or 'eligible=false'}")
-    elif verdict == "OPEN_CANDIDATE":
-        reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
-    return {
+    gate_audit = None
+    if v1_gate:
+        # pool_features v1: the gate is safety + deployability only.  The
+        # score stays in the report for audit but never decides anything.
+        gate = pool_features.gate_v1(
+            pool, bool(gate_cfg.get("require_range_ready", True)))
+        gate_audit = {
+            "source": "missy",
+            "contract_version": pool_features.pool_features_version(pool),
+            "gate": "safety",
+            "thresholds_used": gate.get("thresholds_used") or {},
+            "reject_codes": gate.get("reject_codes") or [],
+        }
+        verdict = "OPEN_CANDIDATE" if gate["ok"] else "IGNORE"
+        reasons.append(gate["reason"])
+    else:
+        # Legacy score rail (v0 records, or v1 while the flag is off).
+        verdict = pool_verdict(score, thresholds)
+        if verdict == "OPEN_CANDIDATE" and pool.get("eligible") is False:
+            verdict = "IGNORE"
+            reasons.append(
+                f"score {score} >= open threshold but Missy gate rejected: "
+                f"{pool.get('rejected_reason') or 'eligible=false'}")
+        elif verdict == "OPEN_CANDIDATE":
+            reasons.append(f"Missy score {score} >= open threshold {thresholds['open']}")
+
+    result = {
         "pool": pool.get("name"),
         "pool_address": pool.get("pool_address"),
         "dex": pool.get("dex"),
@@ -525,12 +557,23 @@ def score_pool_missy(pool: dict, ctx: dict = None) -> dict:
         "pair": [sym_x, sym_y],
         "score": score,
         "components": _missy_components(pool),
-        "score_policy": {"source": policy["source"], "version": policy["version"]},
+        "score_policy": {"source": policy["source"],
+                         "version": policy["version"],
+                         "contract_version": policy.get("contract_version", 0),
+                         "gate": policy.get("gate", "score")},
         "reason": "; ".join(reasons) if reasons else "Missy default score consumed",
         "verdict": verdict,
         "_pool": pool,
-        "dynamic": {"regime": None, "thresholds": "static"},
+        "dynamic": {"regime": None,
+                    "thresholds": ("safety" if v1_gate else "static")},
     }
+    if rank is not None:
+        # Diagnostics only unless pool_ranker.enabled; never gates here.
+        result["net_daily_pct"] = rank.get("net_daily_pct")
+        result["ranker"] = rank
+    if gate_audit is not None:
+        result["pool_gate"] = gate_audit
+    return result
 
 
 def score_pool_fee_yield(pool: dict, max_pts: float, apr_cap_pct: float) -> float:
@@ -1327,9 +1370,19 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
                 "_pool": s.get("_pool")})
 
     # Adaptive thresholds derived from the scored universe.
+    # Once the v1 safety gate is live, v1 verdicts are pass/fail static
+    # decisions: they are excluded from calibration and never re-tagged.
+    # v0 records keep the historical adaptive path.
+    gate_cfg = pool_features.gate_policy()
+    v1_gate_enabled = (bool(gate_cfg.get("enabled"))
+                       and pool_features.contract_enabled())
     if ctx is not None:
-        scores = [s["score"] for s in report["pool_scores"]
-                  if s["pair_class"] not in ("off_universe", "unknown")]
+        scores = [
+            s["score"] for s in report["pool_scores"]
+            if s["pair_class"] not in ("off_universe", "unknown")
+            and not (v1_gate_enabled
+                     and pool_features.is_v1(s.get("_pool") or {}))
+        ]
         adaptive_thr = dynamic.adaptive_pool_thresholds(scores, cfg)
         if adaptive_thr:
             ctx["thresholds"] = adaptive_thr
@@ -1337,6 +1390,8 @@ def run_cycle(pools_dir: str, positions_dir: str, wallet_scans_dir: str = None,
             # Re-tag verdicts using the adaptive thresholds.
             for s in report["pool_scores"]:
                 if s["pair_class"] in ("off_universe", "unknown"):
+                    continue
+                if v1_gate_enabled and pool_features.is_v1(s.get("_pool") or {}):
                     continue
                 s["verdict"] = pool_verdict(s["score"], adaptive_thr)
                 # Missy's discovery gates survive re-tagging: an ineligible

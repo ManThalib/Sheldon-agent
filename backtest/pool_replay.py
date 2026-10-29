@@ -83,8 +83,15 @@ def run_gate_report(pool_paths: list) -> dict:
                 agree += 1
             elif not eligible and legacy_ok:
                 missy_strict += 1
-                reason = p.get("rejected_reason") or "unknown"
-                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+                safety = p.get("safety") or {}
+                codes = safety.get("reject_codes") or []
+                if codes:
+                    reason = ", ".join(str(c) for c in codes)
+                    for code in codes:
+                        reject_reasons[str(code)] = reject_reasons.get(str(code), 0) + 1
+                else:
+                    reason = p.get("rejected_reason") or "unknown"
+                    reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
                 if len(mismatch_examples) < 10:
                     mismatch_examples.append({
                         "path": os.path.basename(path),

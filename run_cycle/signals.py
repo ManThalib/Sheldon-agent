@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from readiness import build_prep_swap_signal
 from readiness import prep_ledger
 from readiness import prep_ledger
+import pool_features
 from run_cycle.close_settlement import (
     close_emit_suppressions,
     position_close_pending,
@@ -46,10 +47,19 @@ def _build_open_signal(strategy: dict, v: dict, pool: dict, idx: int, base: int,
     if not bin_ok:
         return None
 
-    # Score must be present and at/above the policy floor
-    score = v.get("score")
-    if score is None or float(score) < min_score:
-        return None
+    # Score must be present and at/above the policy floor — except for v1
+    # records when the safety gate is enabled: there the gate verdict is
+    # safety.eligible + range_ready, and the score is audit-only.
+    gate_cfg = pool_features.gate_policy()
+    if pool_features.gate_active(pool, gate_cfg):
+        if not pool_features.gate_v1(
+                pool, bool(gate_cfg.get("require_range_ready", True)))["ok"]:
+            return None
+        score = v.get("score")
+    else:
+        score = v.get("score")
+        if score is None or float(score) < min_score:
+            return None
 
     center = strategy.get("center")
     if center is None:
@@ -93,7 +103,7 @@ def _build_open_signal(strategy: dict, v: dict, pool: dict, idx: int, base: int,
         },
         "position_usd": position_usd,
         "strategy_type": strategy.get("strategy_type", "Spot"),
-        "score": float(score),
+        "score": float(score or 0.0),
         "score_policy": {"source": "missy", "version": 1, "min_open_score": min_score},
         "max_slippage_bps": 100,
         "reason": (
@@ -221,16 +231,25 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
     # to land and the wallet to rescan — that ordering is correct.
     from run_cycle.gates import MIN_POSITION_USD as _MIN_POS_USD
     sized_pools = set()
+    gate_cfg = pool_features.gate_policy()
+    require_range_ready = bool(gate_cfg.get("require_range_ready", True))
     for v in report.get("verdicts", []):
         if v.get("action") != "OPEN_CANDIDATE":
             continue
         pool_addr = v.get("pool_address")
         dex = v.get("dex") or "unknown"
         strategy = strategies.get(pool_addr) or {}
-        try:
-            score_ok = v.get("score") is not None and float(v["score"]) >= min_open_score
-        except (TypeError, ValueError):
-            score_ok = False
+        pool = v.get("_pool") or {}
+        if pool_features.gate_active(pool, gate_cfg):
+            # v1: the same safety gate the open filter used. No score read.
+            score_ok = pool_features.gate_v1(
+                pool, require_range_ready)["ok"]
+        else:
+            try:
+                score_ok = (v.get("score") is not None
+                            and float(v["score"]) >= min_open_score)
+            except (TypeError, ValueError):
+                score_ok = False
         if not (pool_addr in strategies and dex in supported_dexes
                 and score_ok
                 and strategy.get("center") is not None

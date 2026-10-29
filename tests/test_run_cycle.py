@@ -10,10 +10,12 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lp_scoring
+import pool_features
 from capital import RESERVED_MINTS, SOL_MINT, USDC_MINT, summarize_wallet
 from readiness import (
     MAX_PREP_SWAPS_PER_MINT_PER_HOUR,
@@ -431,7 +433,7 @@ class WalletCapitalTests(unittest.TestCase):
 
 class CapitalPlanTests(unittest.TestCase):
     def test_open_eligible_idle_and_suggested_both_clear(self):
-        wallet = {"idle_usdc": 100.0, "deployable_usdc": 200.0}
+        wallet = {"idle_usdc": 200.0}
         plan = capital_plan(wallet)
         self.assertTrue(plan["open_eligible"])
         self.assertEqual(plan["suggested_position_usdc"], 100.0)
@@ -441,7 +443,7 @@ class CapitalPlanTests(unittest.TestCase):
         self.assertFalse(capital_plan(wallet)["open_eligible"])
 
     def test_open_not_eligible_low_deployable(self):
-        wallet = {"idle_usdc": 100.0, "deployable_usdc": 10.0}
+        wallet = {"idle_usdc": 10.0}
         plan = capital_plan(wallet)
         self.assertFalse(plan["open_eligible"])
         # suggested_position_usd should be min(deployable*0.75, 100)
@@ -555,7 +557,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(build_strategies(candidates, wallet), [])
 
     def test_strategy_sizing_is_75_percent(self):
-        wallet = {"idle_usdc": 100.0, "deployable_usdc": 200.0}
+        wallet = {"idle_usdc": 200.0}
         candidate = self._candidate(90.0, self._pool(90.0, 1.0, 4))
         strategies = build_strategies([candidate], wallet)
         # 75% of 200 = 150, capped at DEFAULT_MAX_POSITION_USD (100).
@@ -622,9 +624,12 @@ class SignalTests(unittest.TestCase):
     def test_scoring_policy_identity_loads(self):
         from strategy import scoring_policy
         sp = scoring_policy()
-        self.assertEqual(set(sp), {"source", "version", "min_open_score"})
+        self.assertEqual(set(sp), {"source", "version", "contract_version",
+                                   "gate", "min_open_score"})
         self.assertIn(sp["source"], ("missy", "local"))
         self.assertGreaterEqual(sp["version"], 1)
+        self.assertEqual(sp["contract_version"], 1)
+        self.assertEqual(sp["gate"], "safety")
 
     def test_build_dust_swap_signal(self):
         asset = {
@@ -875,9 +880,9 @@ class RunCycleIntegrationTests(unittest.TestCase):
                 {"mint": USDC_MINT, "amount_raw": "100000000", "amount_ui": 100.0,
                  "decimals": 6, "price_usd": 1.0, "total_value_usd": 100.0,
                  "is_native_sol": False},
-                {"mint": SOL_MINT, "symbol": "SOL", "amount_raw": "470000000",
-                 "amount_ui": 0.47, "decimals": 9, "price_usd": 117.0,
-                 "total_value_usd": 54.99, "is_native_sol": True},
+                {"mint": SOL_MINT, "symbol": "SOL", "amount_raw": "600000000",
+                 "amount_ui": 0.6, "decimals": 9, "price_usd": 117.0,
+                 "total_value_usd": 70.2, "is_native_sol": True},
                 {"mint": "DUST", "symbol": "DUST", "amount_raw": "1000000000",
                  "amount_ui": 1.0, "decimals": 9, "price_usd": 20.0,
                  "total_value_usd": 20.0, "is_native_sol": False},
@@ -903,9 +908,8 @@ class RunCycleIntegrationTests(unittest.TestCase):
         self.assertIn("open", actions)
         # Funded from existing balances: no prep swap FOR THIS POOL. A
         # pool-agnostic surplus sell (prep_for_pool is None) is the separate
-        # "dead capital" rebalance and is allowed — at the corrected,
-        # smaller size it leaves ~$7.86 of SOL above the reserve, which
-        # crosses SELL_SURPLUS_MIN_USD ($2).
+        # "dead capital" rebalance and is allowed — the SOL above the
+        # $100-sized open's need still crosses SELL_SURPLUS_MIN_USD ($2).
         self.assertNotIn("p2", prep_for)
         self.assertEqual(actions.count("swap_to_usdc"), 1)
 
@@ -1144,10 +1148,15 @@ class CloseReemitGateTests(unittest.TestCase):
 
     @staticmethod
     def _close_verdict(position_id, pool):
+        # Position-rubric evidence: close-family verdicts without it are
+        # demoted as open-rubric artifacts (see write_signals).
         return {"action": "CLOSE", "position": position_id,
                 "pool": "POOL", "pool_address": pool, "dex": "meteora",
                 "score": 10.0, "lower_bound": 0, "upper_bound": 10,
-                "evidence": {}, "reason": "test"}
+                "evidence": {"range_status": 0.0, "fee_capture": 26.32,
+                             "staleness": 0.0, "depeg_exposure": 0.0,
+                             "il_risk": 31.57},
+                "reason": "test"}
 
     def _report(self, verdicts):
         return {"wallet": {}, "verdicts": verdicts, "open_skipped": [],
@@ -1227,3 +1236,85 @@ class CloseReemitGateTests(unittest.TestCase):
         # unknown id -> exit 1
         rc3 = resolve_entry(state_dir, "sig-never-existed")
         self.assertEqual(rc3, 1)
+
+
+class PoolFeaturesV1Tests(unittest.TestCase):
+    """v1 gate/ranker integration through run_cycle's live entry points."""
+
+    GATE = {"version": 1, "enabled": True, "require_range_ready": True}
+    RANKER = dict(pool_features.DEFAULT_RANKER, enabled=True)
+
+    def _pool(self, addr, *, score=90.0, eligible=True, range_ready=True,
+              apr=100.0, in_range=0.5, vol=2.0, ref=1.0, reject=None):
+        return {
+            "pool_features_version": 1,
+            "name": "SOL-USDC", "pool_address": addr, "dex": "orca",
+            "score": score, "eligible": eligible,
+            "pair_class": "stable_bluechip",
+            "token_x_symbol": "SOL", "token_y_symbol": "USDC",
+            "token_x_decimals": 9, "token_y_decimals": 6,
+            "token_x_price_usd": 100.0, "token_y_price_usd": 1.0,
+            "tvl": 200_000.0, "volume_window": 2_000_000.0,
+            "volatility": vol, "current_tick_index": 100,
+            "bin_step": None, "tick_spacing": 4,
+            "rejected_reason": ", ".join(reject or []),
+            "safety": {"eligible": eligible,
+                       "reject_codes": list(reject or []),
+                       "thresholds_used": {"policy_version": 2}},
+            "data_quality": {"complete": range_ready,
+                             "range_ready": range_ready,
+                             "missing": [] if range_ready else ["range_ready"]},
+            "fee_capture": {"realized_fee_apr": apr},
+            "expected_in_range_frac": in_range,
+            "expected_in_range": {
+                "horizon_days": 3.0, "reference_half_width_pct": ref,
+                "reference_half_width_units": 100, "width_unit": "tick",
+                "vol_daily_pct": vol,
+            },
+            "il_estimate_pct": 0.1,
+            "slippage_estimate_bps": {"100": 0.0, "1000": 0.0},
+        }
+
+    def _candidate(self, pool, score=None):
+        return {"action": "OPEN_CANDIDATE", "pool": pool["name"],
+                "pool_address": pool["pool_address"], "dex": pool["dex"],
+                "pair_class": pool["pair_class"],
+                "score": pool["score"] if score is None else score,
+                "_pool": pool}
+
+    def test_open_filter_keeps_low_score_safety_survivor(self):
+        good = self._pool("GOOD", score=40.0)
+        bad = self._pool("BAD", score=99.0, eligible=False,
+                         reject=["low_tvl"])
+        kept, skipped = _filter_open_candidates(
+            [self._candidate(good), self._candidate(bad)], {},
+            policy_windows={"open_window_utc": "00:00-23:59",
+                            "blackout_dates": []},
+            pool_gate=self.GATE,
+        )
+        self.assertEqual([v["pool_address"] for v in kept], ["GOOD"])
+        self.assertEqual(skipped[0]["reject_codes"], ["low_tvl"])
+
+    def test_build_strategies_ranks_by_net_not_score(self):
+        whale = self._pool("WHALE", score=99.0, apr=20.0, vol=6.0)
+        fee_rich = self._pool("FEE", score=40.0, apr=400.0, vol=1.0)
+        with patch.object(pool_features, "ranker_policy",
+                          return_value=self.RANKER):
+            strategies = build_strategies(
+                [self._candidate(whale), self._candidate(fee_rich)],
+                {"idle_usdc": 500.0, "deployable_usdc": 500.0})
+        self.assertEqual([s["pool_address"] for s in strategies],
+                         ["FEE", "WHALE"])
+        self.assertGreater(strategies[0]["net_daily_pct"],
+                           strategies[1]["net_daily_pct"])
+
+    def test_ranker_flag_off_keeps_score_order(self):
+        whale = self._pool("WHALE", score=99.0, apr=20.0)
+        fee_rich = self._pool("FEE", score=40.0, apr=400.0)
+        with patch.object(pool_features, "ranker_policy",
+                          return_value=dict(self.RANKER, enabled=False)):
+            strategies = build_strategies(
+                [self._candidate(fee_rich), self._candidate(whale)],
+                {"idle_usdc": 500.0, "deployable_usdc": 500.0})
+        self.assertEqual([s["pool_address"] for s in strategies],
+                         ["WHALE", "FEE"])

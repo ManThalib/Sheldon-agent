@@ -1,6 +1,17 @@
 {
   "_comment": "Sheldon scoring configuration. Loaded at startup; invalid file = fatal error (fail-closed). Delete a key to fall back to the built-in default. Weights must sum to 100 per profile. Version tracking for A/B testing and rollback.",
   "version": 2,
+  "pool_features": {
+    "_comment": "Audit/backtest metadata for the Missy pool_features v1 contract. The live switches and ranker constants are single-sourced from sheldon_policy.json (pool_gate / pool_ranker); this block only records which contract this profile was validated against. contract_version 0 is the legacy score-gate branch.",
+    "contract_version": 1,
+    "gate": "safety",
+    "ranker": {
+      "hold_days": 3.0,
+      "variance_divisor": 800.0,
+      "max_il_pct": 5.0,
+      "high_net_daily_pct": 0.10
+    }
+  },
   "pool_profiles": {
     "stable_stable": {
       "weights": {

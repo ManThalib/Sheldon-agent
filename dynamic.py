@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Dynamic calibration layer for Sheldon's LP scoring engine.
+"""DEPRECATED MIRROR — dynamic.py (monolith).
+
+The live module is the ``dynamic/`` package (``import dynamic`` resolves to
+the package, which is a modular split of this file).  This monolith is kept
+only for historical reference and must not be imported by new code.  It is
+patched to match the v1 gate behaviour (adaptive re-tag disabled when
+``pool_gate.enabled``) so the two cannot silently disagree.
+
+Dynamic calibration layer for Sheldon's LP scoring engine.
 
 The static profiles in ``profiles.json`` are absolute: a fee APR is scored
 against a fixed cap, volatility against a fixed peak, and verdicts against
@@ -258,8 +266,16 @@ def adaptive_pool_thresholds(scores, cfg):
     """Derive OPEN/WATCH cut-offs from the quantiles of the scored universe.
 
     Returns ``None`` when there are too few investable pools to calibrate,
-    so the caller keeps the static thresholds.
+    so the caller keeps the static thresholds.  Disabled when the v1 safety
+    gate is enabled (v1 verdicts are pass/fail, not score-relative).
     """
+    try:
+        import pool_features
+        if (pool_features.gate_policy().get("enabled")
+                and pool_features.contract_enabled()):
+            return None
+    except Exception:
+        pass
     thr_cfg = (cfg.get("dynamic") or {}).get("thresholds") or {}
     if not thr_cfg.get("enabled", True):
         return None

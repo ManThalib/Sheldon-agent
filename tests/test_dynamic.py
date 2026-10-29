@@ -5,11 +5,13 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dynamic
 import lp_scoring
+import pool_features
 
 
 class PercentileTests(unittest.TestCase):
@@ -77,6 +79,14 @@ class AdaptiveThresholdsTests(unittest.TestCase):
         self.assertIsNotNone(thr)
         self.assertLessEqual(thr["watch"], thr["open"])
         self.assertTrue(55.0 <= thr["open"] <= 90.0)
+
+    def test_disabled_when_v1_safety_gate_is_live(self):
+        # A weak universe of >=20 pools would normally calibrate and re-tag.
+        scores = [20.0] * 25
+        with patch.object(pool_features, "gate_policy",
+                          return_value={"version": 1, "enabled": True}):
+            self.assertIsNone(
+                dynamic.adaptive_pool_thresholds(scores, self.cfg))
 
 
 class ExpectedPnLTests(unittest.TestCase):

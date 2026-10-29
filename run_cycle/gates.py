@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Dict, Tuple
 
+import pool_features
+
 # Constants
 MIN_POSITION_USD = 20.0
 
@@ -123,13 +125,21 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
                             min_liquidity: float, min_volume: float,
                             allowed_bin_steps: set, reserved_pools: set = None,
                             ctx: dict = None,
-                            cooldown_pools: dict = None) -> tuple:
+                            cooldown_pools: dict = None,
+                            pool_gate: dict = None) -> tuple:
     """Drop open candidates that must not become signals.
 
-    Honors Missy's eligibility flag when present (the default path after
-    Phase 2). For older scans without `eligible`, legacy TVL/volume gates
-    are applied as a backstop. Sheldon-specific rails (bin steps, open
-    score, windows, capital) are always enforced.
+    v1 records (``pool_features_version >= 1``) use Missy's safety block
+    when ``pool_gate.enabled`` is true: ``safety.eligible`` plus
+    ``data_quality.range_ready``.  For those records every score-based
+    rail (min_open_score, dual-model agreement, weighted combination,
+    legacy TVL/volume backstop) is bypassed; the score stays in the report
+    for audit.  v0 records (no version key) and v1 records while the flag
+    is off keep the legacy score gate exactly.
+
+    Sheldon rails are always enforced: windows/blackouts, dedup,
+    already-holding, rotation reservations, reopen cooldown, and the
+    Meteora bin-step rail.
 
     A ``reserved_pools`` set may be provided; pool addresses in this set
     are rotation targets of pending rotations. Candidates for these pools
@@ -156,6 +166,8 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
             "reason": "outside configured open window or blackout date",
         })
         return kept, skipped
+
+    gate_cfg = pool_gate if pool_gate is not None else pool_features.gate_policy()
 
     for v in open_candidates:
         addr = v.get("pool_address")
@@ -187,12 +199,52 @@ def _filter_open_candidates(open_candidates: list, active_positions: dict,
             continue
 
         pool = v.get("_pool") or {}
-        center = _range_center(pool, dex)
-        if center is None:
-            skipped.append({**base,
-                            "reason": "current tick/bin unknown; refusing to open blind"})
+        v1_gate = pool_features.gate_active(pool, gate_cfg)
+
+        # v1: range_ready is Missy's deployability signal; do not re-derive
+        # it with our own tick sniffing.  Legacy records keep the center rail.
+        if not v1_gate:
+            center = _range_center(pool, dex)
+            if center is None:
+                skipped.append({**base,
+                                "reason": "current tick/bin unknown; refusing to open blind"})
+                continue
+
+        # Bin step check: only enforced for Meteora DLMM pools.
+        # Raydium CLMM and Orca Whirlpool use tick_spacing, not bin steps.
+        # Delegated to strategy/bin_step_rail.py — the single implementation
+        # (owner ruling 2026-10-19: any step >= 4, <= 400).
+        if v1_gate:
+            gate = pool_features.gate_v1(
+                pool, bool(gate_cfg.get("require_range_ready", True)))
+            if not gate["ok"]:
+                skipped.append({
+                    **base,
+                    "reason": gate["reason"],
+                    "reject_codes": gate["reject_codes"],
+                    "thresholds_used": gate["thresholds_used"],
+                })
+                continue
+            if dex == "meteora":
+                _ok, _why = _meteora_bin_step_allowed(pool, dex,
+                                                      allowed_bin_steps)
+                if not _ok:
+                    skipped.append({**base, "reason": _why})
+                    continue
+            # Audit trail for the kept decision (additive report field; never
+            # part of George's signal schema).
+            v["pool_gate"] = {
+                "source": "missy",
+                "contract_version": pool_features.pool_features_version(pool),
+                "gate": "safety",
+                "thresholds_used": gate["thresholds_used"],
+                "reject_codes": [],
+            }
+            seen.add(addr)
+            kept.append(v)
             continue
 
+        # ---- Legacy score rail (v0 records; v1 while the flag is off) ----
         # Phase 2: trust Missy's eligibility gate when present.
         eligible = pool.get("eligible")
         if eligible is False:

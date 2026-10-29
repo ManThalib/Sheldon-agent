@@ -17,7 +17,19 @@ def adaptive_pool_thresholds(scores: List[float], cfg: Dict[str, Any]) -> Option
 
     Returns ``None`` when there are too few investable pools to calibrate,
     so the caller keeps the static thresholds.
+
+    When the v1 safety gate is enabled, v1 verdicts are pass/fail and must
+    not be re-tagged by a quantile of the universe: the re-tag is disabled
+    entirely (v0 records keep static thresholds too, which is the safe
+    direction).  See docs/sheldon_contract_v1.md.
     """
+    try:
+        import pool_features
+        if (pool_features.gate_policy().get("enabled")
+                and pool_features.contract_enabled()):
+            return None
+    except Exception:
+        pass
     thr_cfg = (cfg.get("dynamic") or {}).get("thresholds") or {}
     if not thr_cfg.get("enabled", True):
         return None

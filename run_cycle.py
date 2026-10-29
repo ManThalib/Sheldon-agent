@@ -23,6 +23,7 @@ from typing import Optional, Dict, Any
 import lp_scoring
 import range_state
 import recenter
+import pool_features
 from capital import DUST_MIN_USD, USDC_MINT
 from idle_sweep import execute_sweep, load_add_state, plan_sweep
 from readiness import (
@@ -97,7 +98,10 @@ from strategy import (
     scoring_policy,
 )
 
-from run_cycle.gates import _in_trading_window, _filter_open_candidates, _range_center
+from run_cycle.gates import (
+    _in_trading_window, _filter_open_candidates, _range_center,
+    _meteora_bin_step_allowed,
+)
 from run_cycle.signals import write_signals
 from run_cycle.report import append_log, _short_summary, _wake_george
 from run_cycle.rotation import (
@@ -451,20 +455,34 @@ def main() -> int:
         cand_score = best_cand.get("score", 0.0)
         src_pool = pos_v.get("_pool") or {}
         # Check candidate against policy gates (same checks as _filter_open_candidates)
-        cand_checks = {}
-        # Liquidity
-        cand_checks["liquidity"] = float(cand_pool.get("tvl", 0) or 0) >= _POLICY.get("min_pool_liquidity_usd", 25000.0)
-        # Volume
-        cand_checks["volume"] = True  # will check below if data available
-        # Bin step (Meteora only)
-        cand_bin_step = float(cand_pool.get("bin_step") or 0)
-        cand_checks["bin_step"] = cand_bin_step in _POLICY.get("allowed_bin_steps", set())
-        # TVL/volume ratio
-        cand_tvl = float(cand_pool.get("tvl") or 0)
-        cand_volume = float(cand_pool.get("volume_window") or 0)
-        cand_turnover_ratio = (cand_volume / cand_tvl) if cand_tvl > 0 else 0
-        cand_checks["turnover_ratio"] = cand_turnover_ratio <= _POLICY.get("max_turnover_ratio", 50.0)
-        cand_checks["max_volatility"] = float(cand_pool.get("volatility") or 0) <= _POLICY.get("max_volatility_pct", 50)
+        gate_cfg = pool_features.gate_policy()
+        if pool_features.gate_active(cand_pool, gate_cfg):
+            # v1: mirror the open predicate exactly so add/rotate cannot
+            # disagree with open. Score, TVL/volume and dual-model rails do
+            # not apply to a safety-eligible v1 record.
+            cand_gate = pool_features.gate_v1(
+                cand_pool, bool(gate_cfg.get("require_range_ready", True)))
+            bin_ok, _bin_why = _meteora_bin_step_allowed(
+                cand_pool, cand_pool.get("dex") or best_cand.get("dex"))
+            cand_checks = {
+                "missy_safety": cand_gate["ok"],
+                "bin_step": bin_ok,
+            }
+        else:
+            cand_checks = {}
+            # Liquidity
+            cand_checks["liquidity"] = float(cand_pool.get("tvl", 0) or 0) >= _POLICY.get("min_pool_liquidity_usd", 25000.0)
+            # Volume
+            cand_checks["volume"] = True  # will check below if data available
+            # Bin step (Meteora only)
+            cand_bin_step = float(cand_pool.get("bin_step") or 0)
+            cand_checks["bin_step"] = cand_bin_step in _POLICY.get("allowed_bin_steps", set())
+            # TVL/volume ratio
+            cand_tvl = float(cand_pool.get("tvl") or 0)
+            cand_volume = float(cand_pool.get("volume_window") or 0)
+            cand_turnover_ratio = (cand_volume / cand_tvl) if cand_tvl > 0 else 0
+            cand_checks["turnover_ratio"] = cand_turnover_ratio <= _POLICY.get("max_turnover_ratio", 50.0)
+            cand_checks["max_volatility"] = float(cand_pool.get("volatility") or 0) <= _POLICY.get("max_volatility_pct", 50)
         # If any gate fails, skip this rotation candidate
         if not all(cand_checks.values()):
             # Log which gate failed for diagnostics

@@ -49,6 +49,8 @@ def _filter_open_candidates(
     allowed_bin_steps: set = None,
     reserved_pools: set = None,
     ctx: dict = None,
+    cooldown_pools: dict = None,
+    pool_gate: dict = None,
 ) -> tuple:
     """Original _filter_open_candidates from run_cycle.py.
 
@@ -71,7 +73,7 @@ def _filter_open_candidates(
     return _f(
         open_candidates, active_positions,
         policy_windows, min_score, min_liquidity, min_volume,
-        allowed_bin_steps, reserved_pools, ctx,
+        allowed_bin_steps, reserved_pools, ctx, cooldown_pools, pool_gate,
     )
 
 
