@@ -32,9 +32,16 @@ POLICY = {"close_emission": {"require_fresh_scan": True,
 
 
 def _close_verdict(pool="POOL1", pos="PosId1", action="CLOSE"):
+    # A real close verdict is evidenced by the POSITION rubric (patch 02,
+    # 2026-10-25: a close carrying only pool-rubric components is an artifact
+    # and must be demoted). These guard tests exercise the settlement-state
+    # rails, so their fixture must represent a genuine close decision.
     return {"action": action, "pool_address": pool, "dex": "orca",
             "position": pos, "score": 95.0, "lower_bound": 1,
-            "upper_bound": 2, "evidence": "test"}
+            "upper_bound": 2,
+            "evidence": {"range_status": 0.0, "fee_capture": 26.32,
+                         "staleness": 0.0, "depeg_exposure": 0.0,
+                         "il_risk": 31.57}}
 
 
 def _write_scan(positions_dir, mtime):

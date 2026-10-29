@@ -211,8 +211,47 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
             "reason": f"prep swap {b.get('direction')} blocked: {b.get('reason')}",
         })
 
+    # Sizing-gate filter for prep targets. plan_funding() runs on the
+    # pre-split strategy list, so an allowed prep can otherwise pay swap
+    # costs for an open the split/readiness/sizing gates then refuse
+    # (live 2026-10-24: 3 BUYs + 1 surplus sell for an open whose suggested
+    # size never cleared the $20 floor). A prep is only worth a transaction
+    # when its target pool has an OPEN_CANDIDATE that passes every open
+    # gate this cycle; the open itself may still wait a cycle for the prep
+    # to land and the wallet to rescan — that ordering is correct.
+    from run_cycle.gates import MIN_POSITION_USD as _MIN_POS_USD
+    sized_pools = set()
+    for v in report.get("verdicts", []):
+        if v.get("action") != "OPEN_CANDIDATE":
+            continue
+        pool_addr = v.get("pool_address")
+        dex = v.get("dex") or "unknown"
+        strategy = strategies.get(pool_addr) or {}
+        try:
+            score_ok = v.get("score") is not None and float(v["score"]) >= min_open_score
+        except (TypeError, ValueError):
+            score_ok = False
+        if not (pool_addr in strategies and dex in supported_dexes
+                and score_ok
+                and strategy.get("center") is not None
+                and strategy.get("bin_range")
+                and float(strategy.get("suggested_usdc") or 0.0) >= _MIN_POS_USD):
+            continue
+        sized_pools.add(pool_addr)
+
     # 0b. Allowed prep swaps execute before any position signals.
     for spec in allowed_preps:
+        if spec.get("for_pool") not in sized_pools:
+            review.append({
+                "pool_address": spec.get("for_pool"),
+                "dex": "jupiter",
+                "score": (strategies.get(spec.get("for_pool")) or {}).get("score"),
+                "evidence": None,
+                "reason": ("prep deferred: target pool has no OPEN_CANDIDATE "
+                           "passing the sizing gates this cycle (prep runs "
+                           "after the sizing gate, not before)"),
+            })
+            continue
         signal = build_prep_swap_signal(spec, idx, base)
         path = os.path.join(signals_dir, f"{signal['signal_id']}.json")
         with open(path, "w", encoding="utf-8") as fh:
@@ -360,6 +399,40 @@ def write_signals(report: dict, signals_dir: str, positions_dir: str,
                         "reason": (f"{action} suppressed: close {pending_sid} "
                                    f"already in flight for position {pos_id} "
                                    f"(position-level idempotency)"),
+                    })
+                    continue
+            # Open-rubric close artifact (live 2026-10-24, signal
+            # sheldon-1792856108-2: "CLOSE score=94.17" with pool-rubric
+            # evidence, whose real close-rubric verdict was 57.89 — and the
+            # artifact is the one that executed). A close decision must be
+            # evidenced by the POSITION rubric or by OOR provenance stamped
+            # by range_state. A close-family verdict carrying only pool
+            # rubric components (fee_yield/depth/turnover/volatility_fit)
+            # is demoted to review instead of reaching George.
+            if action in {"CLOSE", "REBALANCE", "ROTATE", "RECENTER"}:
+                _evidence = v.get("evidence") or {}
+                if isinstance(_evidence, str):
+                    # Verdicts sometimes carry evidence as a JSON string
+                    # (older scorer output); decode before inspecting keys.
+                    try:
+                        _evidence = json.loads(_evidence)
+                    except ValueError:
+                        _evidence = {}
+                if not isinstance(_evidence, dict):
+                    _evidence = {}
+                _pos_rubric = ("range_status", "fee_capture", "staleness",
+                               "depeg_exposure", "il_risk")
+                if not (any(k in _evidence for k in _pos_rubric)
+                        or _evidence.get("oor_side")):
+                    review.append({
+                        "pool_address": pool_addr,
+                        "dex": dex,
+                        "score": v.get("score"),
+                        "evidence": _evidence,
+                        "reason": ("close demoted: pool-rubric evidence on "
+                                   "close-family verdict, no position-rubric "
+                                   "components and no OOR provenance "
+                                   "(open-rubric close artifact)"),
                     })
                     continue
             lower = v.get("lower_bound")

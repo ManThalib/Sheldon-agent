@@ -45,17 +45,18 @@ def deployable_capital_usd(wallet: Dict[str, Any]) -> float:
 
 
 def open_eligible(wallet: Dict[str, Any]) -> bool:
-    """Open gate: spendable stablecoin must cover the minimum, and the
+    """Open gate: deployable capital must cover the minimum, and the
     suggested position must also clear the minimum.
 
-    Both inputs are stablecoin-only. Volatile assets (``dust_assets`` /
-    ``liquidation_required_usd``) are excluded: they must be sold first, and
-    until then they cannot fund an open. ``idle_stable_usd`` falls back to
-    ``idle_usdc`` so hand-built wallet dicts keep working.
+    Stablecoin covers the Y side directly; capital sizing additionally counts
+    swappable idle SOL above the reserve (owner ruling 2026-10-25) because
+    ``plan_funding`` sells it when an open needs the stable side — so a
+    SOL-heavy wallet is no longer read as dead by the planner. Volatile
+    *dust* (``dust_assets`` / ``liquidation_required_usd``) stays excluded:
+    ``deployable_capital_usd`` never counts it, so WBTC cannot fund an open.
+    ``idle_stable_usd`` falls back to ``idle_usdc`` so hand-built wallet
+    dicts keep working.
     """
-    deployable = float(wallet.get("deployable_usdc") or 0.0)
-    idle = float(wallet.get("idle_stable_usd")
-                 if wallet.get("idle_stable_usd") is not None
-                 else wallet.get("idle_usdc") or 0.0)
+    deployable = deployable_capital_usd(wallet)
     suggested = suggested_position_usd(deployable)
-    return idle >= MIN_POSITION_USD and suggested >= MIN_POSITION_USD
+    return deployable >= MIN_POSITION_USD and suggested >= MIN_POSITION_USD

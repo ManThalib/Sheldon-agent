@@ -221,6 +221,12 @@ def out_of_range_position_verdict(s: dict, state: dict,
     key = "verdict" if "verdict" in s else "action"
     current = s.get(key)
     eligible = side == "right" or runs >= allowed
+    # Stamp evidence provenance so the close-signal writer can prove WHY a
+    # verdict became a close — OOR markers are included even when the close
+    # decision ultimately defers (HOLD) or proceeds (CLOSE).
+    evidence = dict(s.get("evidence") or {})
+    evidence["oor_side"] = side
+    evidence["oor_consecutive_runs"] = runs
     if not eligible:
         out[key] = "HOLD"
         out["reason"] = (
@@ -230,6 +236,7 @@ def out_of_range_position_verdict(s: dict, state: dict,
         out["oor_side"] = side
         out["oor_consecutive_runs"] = runs
         out["oor_close_eligible"] = False
+        out["evidence"] = evidence
         return out
     # This is an explicit OOR exit rail. Do not preserve REBALANCE here:
     # the requested action is to close the position, not close-and-reopen it.
@@ -240,4 +247,5 @@ def out_of_range_position_verdict(s: dict, state: dict,
     out["oor_side"] = side
     out["oor_consecutive_runs"] = runs
     out["oor_close_eligible"] = True
+    out["evidence"] = evidence
     return out

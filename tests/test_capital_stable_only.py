@@ -33,7 +33,11 @@ from capital import (  # noqa: E402
     summarize_wallet,
 )
 from strategy.capital_plan import capital_plan  # noqa: E402
-from strategy.position_sizing import open_eligible, suggested_position_usd  # noqa: E402
+from strategy.position_sizing import (  # noqa: E402
+    open_eligible,
+    suggested_position_usd,
+    deployable_capital_usd,
+)
 
 WBTC_MINT = "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh"
 JUP_MINT = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
@@ -165,6 +169,36 @@ class StableRegistryTests(unittest.TestCase):
         ]))
         self.assertAlmostEqual(summary["deployable_usdc"], 25.0, places=6)
         self.assertAlmostEqual(summary["liquidation_required_usd"], 50.0, places=6)
+
+
+class SwappableSolCountsOwnerRuling(unittest.TestCase):
+    """Owner ruling 2026-10-25: swappable idle SOL is deployable capital."""
+
+    def _wallet(self, idle_usdc, sol_usd, sol_raw):
+        return {"idle_usdc": idle_usdc, "idle_stable_usd": idle_usdc,
+                "idle_sol_usd": sol_usd, "idle_sol_raw_lamports": sol_raw,
+                "dust_total_usd": 0.0, "deployable_usdc": idle_usdc}
+
+    def test_sol_above_reserve_counts_with_haircut(self):
+        w = self._wallet(19.69, 82.35, 765_931_542)   # 60M reserve kept
+        # 19.69 + 82.35 * 0.98 = 100.39
+        # 19.69 + 82.35 * spendable_fraction * 0.98 haircut, where
+        # spendable_fraction keeps the 60M reserve out of the SOL leg.
+        _frac = (765_931_542 - 60_000_000) / 765_931_542
+        self.assertAlmostEqual(deployable_capital_usd(w),
+                               19.69 + 82.35 * _frac * 0.98, places=6)
+        self.assertTrue(open_eligible(w))
+
+    def test_sol_within_reserve_is_not_deployable(self):
+        w = self._wallet(19.69, 4.0, 40_000_000)      # below 60M reserve
+        self.assertAlmostEqual(deployable_capital_usd(w), 19.69, places=6)
+        self.assertFalse(open_eligible(w))            # 75% of 19.69 < $20
+
+    def test_live_deadlock_wallet_is_eligible(self):
+        # The exact 2026-10-25 07:35 shape: 19.69 USDC + 83.87 SOL.
+        w = self._wallet(19.69, 83.87, 825_931_542)
+        self.assertGreater(deployable_capital_usd(w), 95.0)
+        self.assertTrue(open_eligible(w))
 
 
 if __name__ == "__main__":
